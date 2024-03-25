@@ -26,8 +26,11 @@ mod substring;
 mod unary_op;
 mod value;
 
+use std::sync::Arc;
+
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use arrow_schema::DataType;
+use arrow_schema::Field;
 use arrow_schema::TimeUnit;
 use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_err, Column, DFSchema,
@@ -36,6 +39,7 @@ use datafusion_common::{
 use datafusion_expr::expr::AggregateFunctionDefinition;
 use datafusion_expr::expr::InList;
 use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::Literal;
 use datafusion_expr::{
     col, expr, lit, AggregateFunction, Between, BinaryExpr, BuiltinScalarFunction, Cast,
     Expr, ExprSchemable, GetFieldAccess, GetIndexedField, Like, Operator, TryCast,
@@ -600,22 +604,47 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         if !fields.is_empty() {
             return not_impl_err!("Struct fields are not supported yet");
         }
-        let args = values
+        let (fields, args) = values
             .into_iter()
-            .map(|value| {
-                self.sql_expr_to_logical_expr(value, input_schema, planner_context)
+            .enumerate()
+            .map(|(i, value)| {
+
+                let (name, unnamed_expr) = match value {
+                    SQLExpr::Named { expr, name } => {
+                        (name.value, *expr)
+                    }
+                    other => {
+                        (
+                            format!("c{i}"),
+                            other
+                        )
+                    }
+                };
+
+                let logical_expr = self.sql_expr_to_logical_expr(unnamed_expr, input_schema, planner_context)?;
+                let field = Field::new(name, logical_expr.get_type(input_schema)?, true);
+
+                Ok((Arc::new(field), logical_expr))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .unzip::<_, _, Vec<_>, _>();
+
+        let data_type = DataType::Struct(fields.into());
+
         let struct_func = self
             .context_provider
             .get_function_meta("struct")
             .ok_or_else(|| {
                 internal_datafusion_err!("Unable to find expected 'struct' function")
             })?;
-        Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+        
+        let struct_call = Expr::ScalarFunction(ScalarFunction::new_udf(
             struct_func,
             args,
-        )))
+        ));
+
+        Ok(Expr::Cast(Cast::new(Box::new(struct_call), data_type)))
     }
 
     fn parse_array_agg(
