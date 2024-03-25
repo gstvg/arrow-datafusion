@@ -77,6 +77,8 @@
 //! feature is enabled.
 //!
 //! [`ScalarUDF`]: datafusion_expr::ScalarUDF
+use std::sync::Arc;
+
 use datafusion_common::Result;
 use datafusion_execution::FunctionRegistry;
 use log::debug;
@@ -152,6 +154,8 @@ pub fn register_all(registry: &mut dyn FunctionRegistry) -> Result<()> {
         .chain(regex::functions())
         .chain(crypto::functions())
         .chain(string::functions());
+
+    registry.register_function_rewrite(Arc::new(core::r#struct::StructRewriter{}))?;
 
     all_functions.try_for_each(|udf| {
         let existing_udf = registry.register_udf(udf)?;

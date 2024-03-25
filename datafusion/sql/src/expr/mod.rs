@@ -572,6 +572,10 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             SQLExpr::Struct { values, fields } => {
                 self.parse_struct(values, fields, schema, planner_context)
             }
+            SQLExpr::Named { expr, name } => {
+                Ok(self.sql_expr_to_logical_expr(*expr, schema, planner_context)?
+                                    .alias(name.value))
+            }
             SQLExpr::Position { expr, r#in } => {
                 self.sql_position_to_expr(*expr, *r#in, schema, planner_context)
             }

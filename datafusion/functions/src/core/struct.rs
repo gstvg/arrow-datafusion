@@ -17,8 +17,12 @@
 
 use arrow::array::{ArrayRef, StructArray};
 use arrow::datatypes::{DataType, Field, Fields};
-use datafusion_common::{exec_err, Result};
-use datafusion_expr::ColumnarValue;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::tree_node::Transformed;
+use datafusion_common::{exec_err, DFSchema, Result};
+use datafusion_expr::expr::{Alias, ScalarFunction};
+use datafusion_expr::expr_rewriter::FunctionRewrite;
+use datafusion_expr::{cast, Cast, ColumnarValue, Expr, ExprSchemable};
 use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
 use std::any::Any;
 use std::sync::Arc;
@@ -60,6 +64,9 @@ fn struct_expr(args: &[ColumnarValue]) -> Result<ColumnarValue> {
         .collect::<Result<Vec<ArrayRef>>>()?;
     Ok(ColumnarValue::Array(array_struct(arrays.as_slice())?))
 }
+
+const STRUCT_KEYWORD: &'static str = "struct";
+
 #[derive(Debug)]
 pub(super) struct StructFunc {
     signature: Signature,
@@ -78,7 +85,7 @@ impl ScalarUDFImpl for StructFunc {
         self
     }
     fn name(&self) -> &str {
-        "struct"
+        STRUCT_KEYWORD
     }
 
     fn signature(&self) -> &Signature {
@@ -96,6 +103,52 @@ impl ScalarUDFImpl for StructFunc {
 
     fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
         struct_expr(args)
+    }
+}
+
+pub(crate) struct StructRewriter {}
+
+impl FunctionRewrite for StructRewriter {
+    fn name(&self) -> &str {
+        "StructRewriter"
+    }
+
+    fn rewrite(
+        &self,
+        expr: Expr,
+        schema: &DFSchema,
+        _: &ConfigOptions,
+    ) -> Result<Transformed<Expr>> {
+        match &expr {
+            Expr::ScalarFunction(ScalarFunction{func_def, args}) => {
+                if func_def.name() == STRUCT_KEYWORD {
+    
+                    let fields = args.iter()
+                        .enumerate()
+                        .map(|(i, arg)| {
+                            let name = match arg {
+                                Expr::Alias(Alias { expr, relation: None, name }) => {
+                                    Ok(name.clone())
+                                },
+                                Expr::Alias(alias) if alias.relation.is_some() => {
+                                    exec_err!("struct field name must be unqualified: {arg}")
+                                }
+                                _ => {
+                                    Ok(format!("c{i}"))
+                                }
+                            }?;
+    
+                            Ok(Field::new(name, arg.get_type(schema)?, true))
+                        })
+                        .collect::<Result<_>>()?;
+    
+                    Ok(Transformed::yes(cast(expr, DataType::Struct(fields))))
+                } else {
+                    Ok(Transformed::no(expr))
+                }
+            }
+            _ => Ok(Transformed::no(expr)),
+        }
     }
 }
 

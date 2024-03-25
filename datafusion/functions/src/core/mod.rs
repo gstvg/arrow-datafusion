@@ -23,7 +23,7 @@ mod getfield;
 mod nullif;
 mod nvl;
 mod nvl2;
-mod r#struct;
+pub(crate) mod r#struct;
 
 // create UDFs
 make_udf_function!(arrow_cast::ArrowCastFunc, ARROW_CAST, arrow_cast);
