@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::expressions::{self, CastExpr};
@@ -63,7 +64,11 @@ pub fn scatter(mask: &BooleanArray, truthy: &dyn Array) -> Result<ArrayRef> {
 
     // update the mask so that any null values become false
     // (SlicesIterator doesn't respect nulls)
-    let mask = and_kleene(mask, &is_not_null(mask)?)?;
+    let mask = if mask.null_count() == 0 {
+        Cow::Borrowed(mask)
+    } else {
+        Cow::Owned(and_kleene(mask, &is_not_null(mask)?)?)
+    };
 
     let mut mutable = MutableArrayData::new(vec![&truthy], true, mask.len());
 

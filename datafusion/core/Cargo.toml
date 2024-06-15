@@ -216,3 +216,7 @@ name = "topk_aggregate"
 [[bench]]
 harness = false
 name = "parquet_statistic"
+
+[[bench]]
+harness = false
+name = "union_extract"

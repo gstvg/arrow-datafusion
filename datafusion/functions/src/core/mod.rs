@@ -30,6 +30,8 @@ pub mod nullif;
 pub mod nvl;
 pub mod nvl2;
 pub mod r#struct;
+pub mod union_extract;
+pub mod union_tag;
 
 // create UDFs
 make_udf_function!(arrow_cast::ArrowCastFunc, ARROW_CAST, arrow_cast);
@@ -41,6 +43,8 @@ make_udf_function!(r#struct::StructFunc, STRUCT, r#struct);
 make_udf_function!(named_struct::NamedStructFunc, NAMED_STRUCT, named_struct);
 make_udf_function!(getfield::GetFieldFunc, GET_FIELD, get_field);
 make_udf_function!(coalesce::CoalesceFunc, COALESCE, coalesce);
+make_udf_function!(union_extract::UnionExtractFun, UNION_EXTRACT, union_extract);
+make_udf_function!(union_tag::UnionTagFun, UNION_TAG, union_tag);
 
 pub mod expr_fn {
     use datafusion_expr::{Expr, Literal};
@@ -77,11 +81,20 @@ pub mod expr_fn {
         coalesce,
         "Returns `coalesce(args...)`, which evaluates to the value of the first expr which is not NULL",
         args,
+    ),(
+        union_tag,
+        "Returns the name of the current selected field on the union",
+        args,
     ));
 
     #[doc = "Returns the value of the field with the given name from the struct"]
     pub fn get_field(arg1: Expr, arg2: impl Literal) -> Expr {
         super::get_field().call(vec![arg1, arg2.lit()])
+    }
+    
+    #[doc = "Returns the value of the field with the given name from the union when it's selected, and NULL otherwise"]
+    pub fn union_extract(arg1: Expr, arg2: impl Literal) -> Expr {
+        super::union_extract().call(vec![arg1, arg2.lit()])
     }
 }
 
@@ -96,5 +109,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         named_struct(),
         get_field(),
         coalesce(),
+        union_extract(),
+        union_tag(),
     ]
 }
