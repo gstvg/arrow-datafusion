@@ -601,6 +601,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 options: Box::new(WildcardOptions::default()),
             }),
             SQLExpr::Tuple(values) => self.parse_tuple(schema, planner_context, values),
+            // SQLExpr::Lambda
             _ => not_impl_err!("Unsupported ast node in sqltorel: {sql:?}"),
         }
     }

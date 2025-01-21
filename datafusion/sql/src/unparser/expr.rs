@@ -18,8 +18,7 @@
 use datafusion_expr::expr::Unnest;
 use sqlparser::ast::Value::SingleQuotedString;
 use sqlparser::ast::{
-    self, Array, BinaryOperator, Expr as AstExpr, Function, Ident, Interval, ObjectName,
-    Subscript, TimezoneInfo, UnaryOperator,
+    self, Array, BinaryOperator, Expr as AstExpr, Function, Ident, Interval, LambdaFunction, ObjectName, Subscript, TimezoneInfo, UnaryOperator
 };
 use std::sync::Arc;
 use std::vec;
@@ -461,6 +460,10 @@ impl Unparser<'_> {
             }
             Expr::OuterReferenceColumn(_, col) => self.col_to_sql(col),
             Expr::Unnest(unnest) => self.unnest_to_sql(unnest),
+            Expr::Lambda { arg_names, expr } => Ok(ast::Expr::Lambda(LambdaFunction{
+                params: ast::OneOrManyWithParens::Many(arg_names.iter().map(|arg| arg.as_str().into()).collect()),
+                body: Box::new(self.expr_to_sql_inner(expr)?),
+            }))
         }
     }
 

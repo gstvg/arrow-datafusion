@@ -23,9 +23,10 @@ use crate::sort_properties::{ExprProperties, SortProperties};
 use crate::{
     ColumnarValue, Documentation, Expr, ScalarFunctionImplementation, Signature,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::{not_impl_err, ExprSchema, Result, ScalarValue};
 use datafusion_expr_common::interval_arithmetic::Interval;
+use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt::Debug;
@@ -234,6 +235,10 @@ impl ScalarUDF {
         self.inner.invoke_with_args(args)
     }
 
+    pub fn invoke_with_lambda_args(&self, args: ScalarFunctionArgs<ColumnarValueOrLambda>) -> Result<ColumnarValue> {
+        self.inner.invoke_with_lambda_args(args)
+    }
+
     /// Invoke the function without `args` but number of rows, returning the appropriate result.
     ///
     /// Note: This method is deprecated and will be removed in future releases.
@@ -338,14 +343,19 @@ where
 
 /// Arguments passed to [`ScalarUDFImpl::invoke_with_args`] when invoking a
 /// scalar function.
-pub struct ScalarFunctionArgs<'a> {
+pub struct ScalarFunctionArgs<'a, T = ColumnarValue> {
     /// The evaluated arguments to the function
-    pub args: Vec<ColumnarValue>,
+    pub args: Vec<T>,
     /// The number of rows in record batch being evaluated
     pub number_rows: usize,
     /// The return type of the scalar function returned (from `return_type` or `return_type_from_exprs`)
     /// when creating the physical expression from the logical expression
     pub return_type: &'a DataType,
+}
+
+pub enum ColumnarValueOrLambda<'a> {
+    Value(ColumnarValue),
+    Lambda(&'a dyn PhysicalExpr)
 }
 
 /// Information about arguments passed to the function
@@ -630,6 +640,19 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
         self.invoke_batch(&args.args, args.number_rows)
     }
 
+    fn invoke_with_lambda_args(&self, args: ScalarFunctionArgs<ColumnarValueOrLambda>) -> Result<ColumnarValue> {
+        let ScalarFunctionArgs { args, number_rows, return_type } = args;
+
+        let args = args.into_iter()
+            .map(|arg| match arg {
+                ColumnarValueOrLambda::Value(columnar_value) => Ok(columnar_value),
+                ColumnarValueOrLambda::Lambda(_) => Err(todo!()),
+            })
+            .collect::<Result<_>>()?;
+
+        self.invoke_with_args(ScalarFunctionArgs { args, number_rows, return_type})
+    }
+
     /// Invoke the function without `args`, instead the number of rows are provided,
     /// returning the appropriate result.
     ///
@@ -818,6 +841,20 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
     /// generating publicly facing documentation.
     fn documentation(&self) -> Option<&Documentation> {
         None
+    }
+
+    /// Returns the schema where any lambda argument will run
+    fn lambdas_schemas(&self, args: &[Expr], schema: &dyn ExprSchema) -> Result<Vec<Option<Schema>>> {
+        let Expr::Lambda{arg_names, expr: _} = &args[1] else { return Err(todo!()) };
+        
+        use crate::expr_schema::ExprSchemable;
+        
+        let schema = Schema::new(vec![
+            Field::new(&arg_names[0], args[0].get_type(schema)?, args[0].nullable(schema)?),
+            Field::new("index", DataType::Int32, false),
+        ]);
+    
+        Ok(vec![None, Some(schema)])
     }
 }
 

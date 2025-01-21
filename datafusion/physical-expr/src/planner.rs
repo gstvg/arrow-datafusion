@@ -298,9 +298,23 @@ pub fn create_physical_expr(
             input_dfschema,
             execution_props,
         )?),
+        Expr::Lambda { .. } => {
+            Err(todo!())
+        },
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
             let physical_args =
                 create_physical_exprs(args, input_dfschema, execution_props)?;
+            
+            let lambda_schemas = func.inner().lambdas_schemas(args, input_dfschema)?;
+
+            let physical_args = std::iter::zip(args, lambda_schemas)
+                .map(|(expr, schema)| match expr {
+                    Expr::Lambda { arg_names, expr } => {
+                        create_physical_expr(expr, &DFSchema::try_from(schema.unwrap()).unwrap(), execution_props)
+                    },
+                    expr => create_physical_expr(expr, input_dfschema, execution_props)
+                })
+                .collect::<Result<Vec<_>>>()?;
 
             Ok(Arc::new(ScalarFunctionExpr::try_new(
                 Arc::clone(func),

@@ -211,6 +211,7 @@ impl ExprSchemable for Expr {
                 // Grouping sets do not really have a type and do not appear in projections
                 Ok(DataType::Null)
             }
+            Expr::Lambda { .. } => todo!()
         }
     }
 
@@ -326,6 +327,7 @@ impl ExprSchemable for Expr {
                 // in projections
                 Ok(true)
             }
+            Expr::Lambda { .. } => todo!()
         }
     }
 

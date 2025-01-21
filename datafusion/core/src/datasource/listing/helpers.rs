@@ -108,7 +108,8 @@ pub fn expr_applicable_for_cols(col_names: &[&str], expr: &Expr) -> bool {
         | Expr::WindowFunction { .. }
         | Expr::Wildcard { .. }
         | Expr::Unnest { .. }
-        | Expr::Placeholder(_) => {
+        | Expr::Placeholder(_)
+        | Expr::Lambda { .. } => {
             is_applicable = false;
             Ok(TreeNodeRecursion::Stop)
         }

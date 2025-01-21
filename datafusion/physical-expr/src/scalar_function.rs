@@ -34,7 +34,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::expressions::Literal;
+use crate::expressions::{Lambda, Literal};
 use crate::PhysicalExpr;
 
 use arrow::datatypes::{DataType, Schema};
@@ -45,7 +45,7 @@ use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
-    expr_vec_fmt, ColumnarValue, Expr, ReturnTypeArgs, ScalarFunctionArgs, ScalarUDF,
+    expr_vec_fmt, ColumnarValue, ColumnarValueOrLambda, Expr, ReturnTypeArgs, ScalarFunctionArgs, ScalarUDF
 };
 
 /// Physical expression of a scalar function
@@ -183,16 +183,21 @@ impl PhysicalExpr for ScalarFunctionExpr {
         let args = self
             .args
             .iter()
-            .map(|e| e.evaluate(batch))
+            .map(|e| {
+                match e.as_any().downcast_ref::<Lambda>() {
+                    Some(lambda) => Ok(ColumnarValueOrLambda::Lambda(lambda)),
+                    None => Ok(ColumnarValueOrLambda::Value(e.evaluate(batch)?))
+                }
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let input_empty = args.is_empty();
         let input_all_scalar = args
             .iter()
-            .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+            .all(|arg| matches!(arg, ColumnarValueOrLambda::Lambda(_) | ColumnarValueOrLambda::Value(ColumnarValue::Scalar(_))));
 
         // evaluate the function
-        let output = self.fun.invoke_with_args(ScalarFunctionArgs {
+        let output = self.fun.invoke_with_lambda_args(ScalarFunctionArgs {
             args,
             number_rows: batch.num_rows(),
             return_type: &self.return_type,

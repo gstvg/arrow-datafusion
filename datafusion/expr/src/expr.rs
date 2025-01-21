@@ -326,6 +326,8 @@ pub enum Expr {
     OuterReferenceColumn(DataType, Column),
     /// Unnest expression
     Unnest(Unnest),
+    /// Lambda expression
+    Lambda{arg_names: Vec<String>, expr: Box<Expr>},
 }
 
 impl Default for Expr {
@@ -1160,6 +1162,7 @@ impl Expr {
             Expr::WindowFunction { .. } => "WindowFunction",
             Expr::Wildcard { .. } => "Wildcard",
             Expr::Unnest { .. } => "Unnest",
+            Expr::Lambda { .. } => "Lambda",
         }
     }
 
@@ -1660,7 +1663,8 @@ impl Expr {
             | Expr::Wildcard { .. }
             | Expr::WindowFunction(..)
             | Expr::Literal(..)
-            | Expr::Placeholder(..) => false,
+            | Expr::Placeholder(..)
+            | Expr::Lambda{..} => false,
         }
     }
 }
@@ -2203,6 +2207,9 @@ impl HashNode for Expr {
                 column.hash(state);
             }
             Expr::Unnest(Unnest { expr: _expr }) => {}
+            Expr::Lambda{arg_names, expr: _expr} => {
+                arg_names.hash(state);
+            }
         };
     }
 }
@@ -2486,6 +2493,7 @@ impl Display for SchemaDisplay<'_> {
 
                 write!(f, " {window_frame}")
             }
+            Expr::Lambda{arg_names, expr} => write!(f, "({}) -> {}", arg_names.join(", "), SchemaDisplay(expr)),
         }
     }
 }
@@ -2742,7 +2750,8 @@ impl Display for Expr {
             Expr::Placeholder(Placeholder { id, .. }) => write!(f, "{id}"),
             Expr::Unnest(Unnest { expr }) => {
                 write!(f, "{UNNEST_COLUMN_PREFIX}({expr})")
-            }
+            },
+            Expr::Lambda{arg_names, expr} => write!(f, "({}) -> {expr}", arg_names.join(", ")),
         }
     }
 }
