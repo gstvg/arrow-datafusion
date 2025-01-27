@@ -30,7 +30,7 @@ use datafusion_common::alias::AliasGenerator;
 use datafusion_common::cse::{CSEController, FoundCommonNodes, CSE};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{qualified_name, Column, DFSchema, DFSchemaRef, Result};
-use datafusion_expr::expr::{Alias, ScalarFunction};
+use datafusion_expr::expr::{Alias, ScalarFunction, ScalarFunctionArgument};
 use datafusion_expr::logical_plan::{
     Aggregate, Filter, LogicalPlan, Projection, Sort, Window,
 };
@@ -633,7 +633,16 @@ impl CSEController for ExprCSEController<'_> {
             Expr::ScalarFunction(ScalarFunction { func, args })
                 if func.short_circuits() =>
             {
-                Some((vec![], args.iter().collect()))
+                Some((
+                    vec![],
+                    args.iter()
+                        .map(|arg| match arg {
+                            ScalarFunctionArgument::Expr(expr) => Ok(expr),
+                            ScalarFunctionArgument::Lambda { .. } => Err(()),
+                        })
+                        .collect::<Result<_, _>>()
+                        .ok()?,
+                ))
             }
 
             // In case of `And` and `Or` the first child is surely executed, but we

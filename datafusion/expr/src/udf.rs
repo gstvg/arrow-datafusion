@@ -17,19 +17,21 @@
 
 //! [`ScalarUDF`]: Scalar User Defined Functions
 
-use crate::expr::schema_name_from_exprs_comma_separated_without_space;
+use crate::expr::{
+    schema_name_from_exprs_comma_separated_without_space, ScalarFunctionArgument,
+};
 use crate::simplify::{ExprSimplifyResult, SimplifyInfo};
 use crate::sort_properties::{ExprProperties, SortProperties};
 use crate::{
     ColumnarValue, Documentation, Expr, ScalarFunctionImplementation, Signature,
 };
-use arrow::datatypes::{DataType, Field, Schema};
-use datafusion_common::{not_impl_err, ExprSchema, Result, ScalarValue};
+use arrow::datatypes::{DataType, Schema};
+use datafusion_common::{exec_err, not_impl_err, ExprSchema, Result, ScalarValue};
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
 use std::cmp::Ordering;
-use std::fmt::Debug;
+use std::fmt::{Debug, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
@@ -151,6 +153,16 @@ impl ScalarUDF {
         self.inner.schema_name(args)
     }
 
+    /// Returns this function's schema_name.
+    ///
+    /// See [`ScalarUDFImpl::schema_name`] for more details
+    pub fn schema_name_with_lambda(
+        &self,
+        args: &[ScalarFunctionArgument],
+    ) -> Result<String> {
+        self.inner.schema_name_with_lambda(args)
+    }
+
     /// Returns the aliases for this function.
     ///
     /// See [`ScalarUDF::with_aliases`] for more details
@@ -208,6 +220,17 @@ impl ScalarUDF {
     ) -> Result<ExprSimplifyResult> {
         self.inner.simplify(args, info)
     }
+    
+    /// Do the function rewrite
+    ///
+    /// See [`ScalarUDFImpl::simplify`] for more details.
+    pub fn simplify_with_lambda(
+        &self,
+        args: Vec<ScalarFunctionArgument>,
+        info: &dyn SimplifyInfo,
+    ) -> Result<ExprSimplifyResult<ScalarFunctionArgument>> {
+        self.inner.simplify_with_lambda(args, info)
+    }
 
     #[deprecated(since = "42.1.0", note = "Use `invoke_with_args` instead")]
     pub fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
@@ -235,7 +258,10 @@ impl ScalarUDF {
         self.inner.invoke_with_args(args)
     }
 
-    pub fn invoke_with_lambda_args(&self, args: ScalarFunctionArgs<ColumnarValueOrLambda>) -> Result<ColumnarValue> {
+    pub fn invoke_with_lambda_args(
+        &self,
+        args: ScalarFunctionArgs<ColumnarValueOrLambda>,
+    ) -> Result<ColumnarValue> {
         self.inner.invoke_with_lambda_args(args)
     }
 
@@ -355,7 +381,7 @@ pub struct ScalarFunctionArgs<'a, T = ColumnarValue> {
 
 pub enum ColumnarValueOrLambda<'a> {
     Value(ColumnarValue),
-    Lambda(&'a dyn PhysicalExpr)
+    Lambda{args: &'a [String], body: &'a dyn PhysicalExpr},
 }
 
 /// Information about arguments passed to the function
@@ -378,6 +404,13 @@ pub struct ReturnTypeArgs<'a> {
     pub scalar_arguments: &'a [Option<&'a ScalarValue>],
     /// Can argument `i` (ever) null?
     pub nullables: &'a [bool],
+    /// Is argument `i` to the function a lambda
+    ///
+    /// If argument `i` is not a lambda, it will be None
+    ///
+    /// For example, if a function is called like `my_function(x -> x*2, 5)`
+    /// this field will be `[None, Some((vec!["x"], Expr("x*2")))]`
+    pub lambda_arguments: &'a [Option<(&'a [String], &'a Expr)>]
 }
 
 /// Return metadata for this function.
@@ -522,6 +555,32 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
         ))
     }
 
+    fn schema_name_with_lambda(&self, args: &[ScalarFunctionArgument]) -> Result<String> {
+        let mut s = String::new();
+        for (i, e) in args.iter().enumerate() {
+            if i > 0 {
+                write!(&mut s, ",")?;
+            }
+            match e {
+                ScalarFunctionArgument::Expr(expr) => {
+                    write!(&mut s, "{}", expr.schema_name())?
+                }
+                ScalarFunctionArgument::Lambda { arg_names, expr } => write!(
+                    s,
+                    "({}) -> {}",
+                    arg_names
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    expr.schema_name()
+                )?,
+            }
+        }
+
+        Ok(format!("{}({})", self.name(), s))
+    }
+
     /// Returns the function's [`Signature`] for information about what input
     /// types are accepted and the function's Volatility.
     fn signature(&self) -> &Signature;
@@ -640,17 +699,29 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
         self.invoke_batch(&args.args, args.number_rows)
     }
 
-    fn invoke_with_lambda_args(&self, args: ScalarFunctionArgs<ColumnarValueOrLambda>) -> Result<ColumnarValue> {
-        let ScalarFunctionArgs { args, number_rows, return_type } = args;
+    fn invoke_with_lambda_args(
+        &self,
+        args: ScalarFunctionArgs<ColumnarValueOrLambda>,
+    ) -> Result<ColumnarValue> {
+        let ScalarFunctionArgs {
+            args,
+            number_rows,
+            return_type,
+        } = args;
 
-        let args = args.into_iter()
+        let args = args
+            .into_iter()
             .map(|arg| match arg {
                 ColumnarValueOrLambda::Value(columnar_value) => Ok(columnar_value),
-                ColumnarValueOrLambda::Lambda(_) => Err(todo!()),
+                ColumnarValueOrLambda::Lambda{ .. } => exec_err!("Non lambda scalar function called with lambda"),
             })
             .collect::<Result<_>>()?;
 
-        self.invoke_with_args(ScalarFunctionArgs { args, number_rows, return_type})
+        self.invoke_with_args(ScalarFunctionArgs {
+            args,
+            number_rows,
+            return_type,
+        })
     }
 
     /// Invoke the function without `args`, instead the number of rows are provided,
@@ -703,6 +774,15 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
         args: Vec<Expr>,
         _info: &dyn SimplifyInfo,
     ) -> Result<ExprSimplifyResult> {
+        // self.simplify_with_lambda(args.into_iter().map(ScalarFunctionArgument::Expr).collect(), info)
+        Ok(ExprSimplifyResult::Original(args))
+    }
+
+    fn simplify_with_lambda(
+        &self,
+        args: Vec<ScalarFunctionArgument>,
+        _info: &dyn SimplifyInfo,
+    ) -> Result<ExprSimplifyResult<ScalarFunctionArgument>> {
         Ok(ExprSimplifyResult::Original(args))
     }
 
@@ -844,17 +924,31 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
     }
 
     /// Returns the schema where any lambda argument will run
-    fn lambdas_schemas(&self, args: &[Expr], schema: &dyn ExprSchema) -> Result<Vec<Option<Schema>>> {
-        let Expr::Lambda{arg_names, expr: _} = &args[1] else { return Err(todo!()) };
-        
-        use crate::expr_schema::ExprSchemable;
-        
-        let schema = Schema::new(vec![
-            Field::new(&arg_names[0], args[0].get_type(schema)?, args[0].nullable(schema)?),
-            Field::new("index", DataType::Int32, false),
-        ]);
-    
-        Ok(vec![None, Some(schema)])
+    fn lambdas_schemas(
+        &self,
+        args: &[ScalarFunctionArgument],
+        _schema: &dyn ExprSchema,
+    ) -> Result<Vec<Option<Schema>>> {
+        // let [
+        //     ScalarFunctionArgument::Lambda { arg_names, expr: _ },
+        //     ScalarFunctionArgument::Expr(expr),
+        // ] = &args else {
+        //     return Err(todo!());
+        // };
+
+        // use crate::expr_schema::ExprSchemable;
+
+        // let schema = Schema::new(vec![
+        //     Field::new(
+        //         arg_names[0].to_string(),
+        //         expr.get_type(schema)?,
+        //         expr.nullable(schema)?,
+        //     ),
+        //     Field::new("index", DataType::Int32, false),
+        // ]);
+
+        // Ok(vec![None, Some(schema)])
+        Ok(vec![None; args.len()])
     }
 }
 

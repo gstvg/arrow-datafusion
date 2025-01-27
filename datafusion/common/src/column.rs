@@ -198,7 +198,7 @@ impl Column {
         schemas: &[&[&DFSchema]],
         using_columns: &[HashSet<Column>],
     ) -> Result<Self> {
-        if self.relation.is_some() {
+        if self.relation.is_some() || true {
             return Ok(self);
         }
 

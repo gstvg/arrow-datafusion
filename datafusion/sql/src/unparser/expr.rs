@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_expr::expr::Unnest;
+use datafusion_expr::expr::{ScalarFunctionArgument, Unnest};
 use sqlparser::ast::Value::SingleQuotedString;
 use sqlparser::ast::{
     self, Array, BinaryOperator, Expr as AstExpr, Function, Ident, Interval, LambdaFunction, ObjectName, Subscript, TimezoneInfo, UnaryOperator
@@ -460,17 +460,17 @@ impl Unparser<'_> {
             }
             Expr::OuterReferenceColumn(_, col) => self.col_to_sql(col),
             Expr::Unnest(unnest) => self.unnest_to_sql(unnest),
-            Expr::Lambda { arg_names, expr } => Ok(ast::Expr::Lambda(LambdaFunction{
-                params: ast::OneOrManyWithParens::Many(arg_names.iter().map(|arg| arg.as_str().into()).collect()),
-                body: Box::new(self.expr_to_sql_inner(expr)?),
-            }))
+            // Expr::Lambda { arg_names, expr } => Ok(ast::Expr::Lambda(LambdaFunction{
+            //     params: ast::OneOrManyWithParens::Many(arg_names.iter().map(|arg| arg.as_str().into()).collect()),
+            //     body: Box::new(self.expr_to_sql_inner(expr)?),
+            // }))
         }
     }
 
     pub fn scalar_function_to_sql(
         &self,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<ast::Expr> {
         match func_name {
             "make_array" => self.make_array_to_sql(args),
@@ -483,12 +483,22 @@ impl Unparser<'_> {
         }
     }
 
+    pub(crate) fn scalar_function_argument_to_sql(&self, arg: &ScalarFunctionArgument) -> Result<ast::Expr> {
+        match arg {
+            ScalarFunctionArgument::Expr(expr) => self.expr_to_sql(expr),
+            ScalarFunctionArgument::Lambda { arg_names, expr } => Ok(ast::Expr::Lambda(LambdaFunction{
+                params: ast::OneOrManyWithParens::Many(arg_names.iter().map(|c| c.to_string().as_str().into()).collect()),
+                body: Box::new(self.expr_to_sql(expr)?),
+            })),
+        }
+    }
+
     fn scalar_function_to_sql_internal(
         &self,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<ast::Expr> {
-        let args = self.function_args_to_sql(args)?;
+        let args = self.scalar_function_args_to_sql(args)?;
         Ok(ast::Expr::Function(Function {
             name: ObjectName(vec![Ident {
                 value: func_name.to_string(),
@@ -509,10 +519,10 @@ impl Unparser<'_> {
         }))
     }
 
-    fn make_array_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+    fn make_array_to_sql(&self, args: &[ScalarFunctionArgument]) -> Result<ast::Expr> {
         let args = args
             .iter()
-            .map(|e| self.expr_to_sql(e))
+            .map(|e| self.scalar_function_argument_to_sql(e))
             .collect::<Result<Vec<_>>>()?;
         Ok(ast::Expr::Array(Array {
             elem: args,
@@ -520,19 +530,19 @@ impl Unparser<'_> {
         }))
     }
 
-    fn array_element_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+    fn array_element_to_sql(&self, args: &[ScalarFunctionArgument]) -> Result<ast::Expr> {
         if args.len() != 2 {
             return internal_err!("array_element must have exactly 2 arguments");
         }
-        let array = self.expr_to_sql(&args[0])?;
-        let index = self.expr_to_sql(&args[1])?;
+        let array = self.scalar_function_argument_to_sql(&args[0])?;
+        let index = self.scalar_function_argument_to_sql(&args[1])?;
         Ok(ast::Expr::Subscript {
             expr: Box::new(array),
             subscript: Box::new(Subscript::Index { index }),
         })
     }
 
-    fn named_struct_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+    fn named_struct_to_sql(&self, args: &[ScalarFunctionArgument]) -> Result<ast::Expr> {
         if args.len() % 2 != 0 {
             return internal_err!("named_struct must have an even number of arguments");
         }
@@ -541,13 +551,13 @@ impl Unparser<'_> {
             .chunks_exact(2)
             .map(|chunk| {
                 let key = match &chunk[0] {
-                    Expr::Literal(ScalarValue::Utf8(Some(s))) => self.new_ident_quoted_if_needs(s.to_string()),
+                    ScalarFunctionArgument::Expr(Expr::Literal(ScalarValue::Utf8(Some(s)))) => self.new_ident_quoted_if_needs(s.to_string()),
                     _ => return internal_err!("named_struct expects even arguments to be strings, but received: {:?}", &chunk[0])
                 };
 
                 Ok(ast::DictionaryField {
                     key,
-                    value: Box::new(self.expr_to_sql(&chunk[1])?),
+                    value: Box::new(self.scalar_function_argument_to_sql(&chunk[1])?),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -555,13 +565,13 @@ impl Unparser<'_> {
         Ok(ast::Expr::Dictionary(args))
     }
 
-    fn get_field_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+    fn get_field_to_sql(&self, args: &[ScalarFunctionArgument]) -> Result<ast::Expr> {
         if args.len() != 2 {
             return internal_err!("get_field must have exactly 2 arguments");
         }
 
         let mut id = match &args[0] {
-            Expr::Column(col) => match self.col_to_sql(col)? {
+            ScalarFunctionArgument::Expr(Expr::Column(col)) => match self.col_to_sql(col)? {
                 ast::Expr::Identifier(ident) => vec![ident],
                 ast::Expr::CompoundIdentifier(idents) => idents,
                 other => return internal_err!("expected col_to_sql to return an Identifier or CompoundIdentifier, but received: {:?}", other),
@@ -570,7 +580,7 @@ impl Unparser<'_> {
         };
 
         let field = match &args[1] {
-            Expr::Literal(lit) => self.new_ident_quoted_if_needs(lit.to_string()),
+            ScalarFunctionArgument::Expr(Expr::Literal(lit)) => self.new_ident_quoted_if_needs(lit.to_string()),
             _ => {
                 return internal_err!(
                 "get_field expects second argument to be a string, but received: {:?}",
@@ -583,12 +593,12 @@ impl Unparser<'_> {
         Ok(ast::Expr::CompoundIdentifier(id))
     }
 
-    fn map_to_sql(&self, args: &[Expr]) -> Result<ast::Expr> {
+    fn map_to_sql(&self, args: &[ScalarFunctionArgument]) -> Result<ast::Expr> {
         if args.len() != 2 {
             return internal_err!("map must have exactly 2 arguments");
         }
 
-        let ast::Expr::Array(Array { elem: keys, .. }) = self.expr_to_sql(&args[0])?
+        let ast::Expr::Array(Array { elem: keys, .. }) = self.scalar_function_argument_to_sql(&args[0])?
         else {
             return internal_err!(
                 "map expects first argument to be an array, but received: {:?}",
@@ -596,7 +606,7 @@ impl Unparser<'_> {
             );
         };
 
-        let ast::Expr::Array(Array { elem: values, .. }) = self.expr_to_sql(&args[1])?
+        let ast::Expr::Array(Array { elem: values, .. }) = self.scalar_function_argument_to_sql(&args[1])?
         else {
             return internal_err!(
                 "map expects second argument to be an array, but received: {:?}",
@@ -701,21 +711,37 @@ impl Unparser<'_> {
         args: &[Expr],
     ) -> Result<Vec<ast::FunctionArg>> {
         args.iter()
-            .map(|e| {
-                if matches!(
-                    e,
-                    Expr::Wildcard {
-                        qualifier: None,
-                        ..
-                    }
-                ) {
-                    Ok(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))
-                } else {
-                    self.expr_to_sql(e)
-                        .map(|e| ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)))
+            .map(|a| self.expr_function_arg_to_sql(a))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub(crate) fn scalar_function_args_to_sql(
+        &self,
+        args: &[ScalarFunctionArgument],
+    ) -> Result<Vec<ast::FunctionArg>> {
+        args.iter()
+            .map(|a| {
+                match a {
+                    ScalarFunctionArgument::Expr(expr) => self.expr_function_arg_to_sql(expr),
+                    arg => self.scalar_function_argument_to_sql(arg).map(|e| ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e))),
                 }
             })
             .collect::<Result<Vec<_>>>()
+    }
+
+    fn expr_function_arg_to_sql(&self, expr_arg: &Expr) -> Result<ast::FunctionArg> {
+        if matches!(
+            expr_arg,
+            Expr::Wildcard {
+                qualifier: None,
+                ..
+            }
+        ) {
+            Ok(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard))
+        } else {
+            self.expr_to_sql(expr_arg)
+                .map(|e| ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)))
+        }
     }
 
     /// This function can create an identifier with or without quotes based on the dialect rules
@@ -1492,7 +1518,7 @@ impl Unparser<'_> {
     /// Converts an UNNEST operation to an AST expression by wrapping it as a function call,
     /// since there is no direct representation for UNNEST in the AST.
     fn unnest_to_sql(&self, unnest: &Unnest) -> Result<ast::Expr> {
-        let args = self.function_args_to_sql(std::slice::from_ref(&unnest.expr))?;
+        let args = vec![self.expr_function_arg_to_sql(&unnest.expr)?];
 
         Ok(ast::Expr::Function(Function {
             name: ObjectName(vec![Ident {
@@ -2658,18 +2684,18 @@ mod tests {
             [(default_dialect, "DOUBLE"), (postgres_dialect, "NUMERIC")]
         {
             let unparser = Unparser::new(dialect.as_ref());
-            let expr = Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(ScalarUDF::from(
+            let expr = Expr::ScalarFunction(ScalarFunction::new_udf(
+                Arc::new(ScalarUDF::from(
                     datafusion_functions::math::round::RoundFunc::new(),
                 )),
-                args: vec![
+                vec![
                     Expr::Cast(Cast {
                         expr: Box::new(col("a")),
                         data_type: DataType::Float64,
                     }),
                     Expr::Literal(ScalarValue::Int64(Some(2))),
                 ],
-            });
+            ));
             let ast = unparser.expr_to_sql(&expr)?;
 
             let actual = format!("{}", ast);
@@ -2731,7 +2757,7 @@ mod tests {
         let duckdb_default = DuckDBDialect::new();
         let duckdb_extended = DuckDBDialect::new().with_custom_scalar_overrides(vec![(
             "dummy_udf",
-            Box::new(|unparser: &Unparser, args: &[Expr]| {
+            Box::new(|unparser: &Unparser, args: &[ScalarFunctionArgument]| {
                 unparser.scalar_function_to_sql("smart_udf", args).map(Some)
             }) as ScalarFnToSqlHandler,
         )]);

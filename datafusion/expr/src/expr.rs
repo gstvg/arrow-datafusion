@@ -326,8 +326,6 @@ pub enum Expr {
     OuterReferenceColumn(DataType, Column),
     /// Unnest expression
     Unnest(Unnest),
-    /// Lambda expression
-    Lambda{arg_names: Vec<String>, expr: Box<Expr>},
 }
 
 impl Default for Expr {
@@ -550,7 +548,7 @@ pub struct ScalarFunction {
     /// The function
     pub func: Arc<crate::ScalarUDF>,
     /// List of expressions to feed to the functions as arguments
-    pub args: Vec<Expr>,
+    pub args: Vec<ScalarFunctionArgument>,
 }
 
 impl ScalarFunction {
@@ -563,7 +561,71 @@ impl ScalarFunction {
 impl ScalarFunction {
     /// Create a new ScalarFunction expression with a user-defined function (UDF)
     pub fn new_udf(udf: Arc<crate::ScalarUDF>, args: Vec<Expr>) -> Self {
+        Self {
+            func: udf,
+            args: args.into_iter().map(ScalarFunctionArgument::Expr).collect(),
+        }
+    }
+
+    /// Create a new ScalarFunction expression with a user-defined function (UDF)
+    pub fn new_udf_with_lambda(
+        udf: Arc<crate::ScalarUDF>,
+        args: Vec<ScalarFunctionArgument>,
+    ) -> Self {
         Self { func: udf, args }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub enum ScalarFunctionArgument {
+    Expr(Expr),
+    Lambda { arg_names: Vec<String>, expr: Expr },
+}
+
+impl Display for ScalarFunctionArgument {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ScalarFunctionArgument::Expr(expr) => write!(f, "{expr}"),
+            ScalarFunctionArgument::Lambda { arg_names, expr } => write!(
+                f,
+                "({}) -> {expr}",
+                arg_names
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+impl<'a> TreeNodeContainer<'a, Expr> for ScalarFunctionArgument {
+    fn apply_elements<F: FnMut(&'a Expr) -> Result<TreeNodeRecursion>>(
+        &'a self,
+        f: F,
+    ) -> Result<TreeNodeRecursion> {
+        match self {
+            ScalarFunctionArgument::Expr(expr) => expr.apply_elements(f),
+            ScalarFunctionArgument::Lambda { arg_names: _, expr } => {
+                // expr.apply_elements(f)
+                Ok(TreeNodeRecursion::Continue)
+            }
+        }
+    }
+
+    fn map_elements<F: FnMut(Expr) -> Result<Transformed<Expr>>>(
+        self,
+        f: F,
+    ) -> Result<Transformed<Self>> {
+        match self {
+            ScalarFunctionArgument::Expr(expr) => {
+                expr.map_elements(f)?.map_data(|expr| Ok(ScalarFunctionArgument::Expr(expr)))
+            }
+            // ScalarFunctionArgument::Lambda { arg_names, expr } => {
+            //     expr.map_elements(f)?.map_data(|expr| Ok(ScalarFunctionArgument::Lambda { arg_names, expr }))
+            // }
+            lambda => Ok(Transformed::no(lambda))
+        }
     }
 }
 
@@ -1162,7 +1224,6 @@ impl Expr {
             Expr::WindowFunction { .. } => "WindowFunction",
             Expr::Wildcard { .. } => "Wildcard",
             Expr::Unnest { .. } => "Unnest",
-            Expr::Lambda { .. } => "Lambda",
         }
     }
 
@@ -1663,8 +1724,7 @@ impl Expr {
             | Expr::Wildcard { .. }
             | Expr::WindowFunction(..)
             | Expr::Literal(..)
-            | Expr::Placeholder(..)
-            | Expr::Lambda{..} => false,
+            | Expr::Placeholder(..) => false,
         }
     }
 }
@@ -1846,10 +1906,27 @@ impl NormalizeEq for Expr {
             ) => {
                 self_func.name() == other_func.name()
                     && self_args.len() == other_args.len()
-                    && self_args
-                        .iter()
-                        .zip(other_args.iter())
-                        .all(|(a, b)| a.normalize_eq(b))
+                    && self_args.iter().zip(other_args.iter()).all(|(a, b)| {
+                        match (a, b) {
+                            (
+                                ScalarFunctionArgument::Expr(a_expr),
+                                ScalarFunctionArgument::Expr(b_expr),
+                            ) => a_expr.normalize_eq(b_expr),
+                            (
+                                ScalarFunctionArgument::Lambda {
+                                    arg_names: a_arg_names,
+                                    expr: a_expr,
+                                },
+                                ScalarFunctionArgument::Lambda {
+                                    arg_names: b_arg_names,
+                                    expr: b_expr,
+                                },
+                            ) => {
+                                a_arg_names == b_arg_names && a_expr.normalize_eq(b_expr)
+                            }
+                            _ => false,
+                        }
+                    })
             }
             (
                 Expr::AggregateFunction(AggregateFunction {
@@ -2207,9 +2284,6 @@ impl HashNode for Expr {
                 column.hash(state);
             }
             Expr::Unnest(Unnest { expr: _expr }) => {}
-            Expr::Lambda{arg_names, expr: _expr} => {
-                arg_names.hash(state);
-            }
         };
     }
 }
@@ -2424,7 +2498,7 @@ impl Display for SchemaDisplay<'_> {
                 write!(f, "UNNEST({})", SchemaDisplay(expr))
             }
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                match func.schema_name(args) {
+                match func.schema_name_with_lambda(args) {
                     Ok(name) => {
                         write!(f, "{name}")
                     }
@@ -2493,7 +2567,6 @@ impl Display for SchemaDisplay<'_> {
 
                 write!(f, " {window_frame}")
             }
-            Expr::Lambda{arg_names, expr} => write!(f, "({}) -> {}", arg_names.join(", "), SchemaDisplay(expr)),
         }
     }
 }
@@ -2750,8 +2823,7 @@ impl Display for Expr {
             Expr::Placeholder(Placeholder { id, .. }) => write!(f, "{id}"),
             Expr::Unnest(Unnest { expr }) => {
                 write!(f, "{UNNEST_COLUMN_PREFIX}({expr})")
-            },
-            Expr::Lambda{arg_names, expr} => write!(f, "({}) -> {expr}", arg_names.join(", ")),
+            }
         }
     }
 }
@@ -2760,7 +2832,7 @@ fn fmt_function(
     f: &mut Formatter,
     fun: &str,
     distinct: bool,
-    args: &[Expr],
+    args: &[impl Display + fmt::Debug],
     display: bool,
 ) -> fmt::Result {
     let args: Vec<String> = match display {

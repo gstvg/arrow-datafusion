@@ -27,7 +27,7 @@ use datafusion_common::{
     Column, DataFusionError, Result, ScalarValue,
 };
 use datafusion_expr::{
-    expr, utils::grouping_set_to_exprlist, Aggregate, Expr, LogicalPlan,
+    expr::{self, ScalarFunctionArgument}, utils::grouping_set_to_exprlist, Aggregate, Expr, LogicalPlan,
     LogicalPlanBuilder, Projection, SortExpr, Unnest, Window,
 };
 
@@ -410,12 +410,12 @@ pub(crate) fn try_transform_to_simple_table_scan_with_filters(
 pub(crate) fn date_part_to_sql(
     unparser: &Unparser,
     style: DateFieldExtractStyle,
-    date_part_args: &[Expr],
+    date_part_args: &[ScalarFunctionArgument],
 ) -> Result<Option<ast::Expr>> {
     match (style, date_part_args.len()) {
         (DateFieldExtractStyle::Extract, 2) => {
-            let date_expr = unparser.expr_to_sql(&date_part_args[1])?;
-            if let Expr::Literal(ScalarValue::Utf8(Some(field))) = &date_part_args[0] {
+            let date_expr = unparser.scalar_function_argument_to_sql(&date_part_args[1])?;
+            if let ScalarFunctionArgument::Expr(Expr::Literal(ScalarValue::Utf8(Some(field)))) = &date_part_args[0] {
                 let field = match field.to_lowercase().as_str() {
                     "year" => ast::DateTimeField::Year,
                     "month" => ast::DateTimeField::Month,
@@ -434,9 +434,9 @@ pub(crate) fn date_part_to_sql(
             }
         }
         (DateFieldExtractStyle::Strftime, 2) => {
-            let column = unparser.expr_to_sql(&date_part_args[1])?;
+            let column = unparser.scalar_function_argument_to_sql(&date_part_args[1])?;
 
-            if let Expr::Literal(ScalarValue::Utf8(Some(field))) = &date_part_args[0] {
+            if let ScalarFunctionArgument::Expr(Expr::Literal(ScalarValue::Utf8(Some(field)))) = &date_part_args[0] {
                 let field = match field.to_lowercase().as_str() {
                     "year" => "%Y",
                     "month" => "%m",
@@ -488,7 +488,7 @@ pub(crate) fn date_part_to_sql(
 pub(crate) fn character_length_to_sql(
     unparser: &Unparser,
     style: CharacterLengthStyle,
-    character_length_args: &[Expr],
+    character_length_args: &[ScalarFunctionArgument],
 ) -> Result<Option<ast::Expr>> {
     let func_name = match style {
         CharacterLengthStyle::CharacterLength => "character_length",

@@ -27,7 +27,7 @@ use arrow::datatypes::{DataType, Float32Type, Float64Type};
 use datafusion_common::{
     exec_err, internal_err, plan_datafusion_err, plan_err, Result, ScalarValue,
 };
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::expr::{ScalarFunction, ScalarFunctionArgument};
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
 use datafusion_expr::sort_properties::{ExprProperties, SortProperties};
 use datafusion_expr::{
@@ -219,10 +219,15 @@ impl ScalarUDFImpl for LogFunc {
                 )?)))
             }
             Expr::ScalarFunction(ScalarFunction { func, mut args })
-                if is_pow(&func) && args.len() == 2 && base == args[0] =>
+                if is_pow(&func) && is_same_base(&base, &args) =>
             {
-                let b = args.pop().unwrap(); // length checked above
-                Ok(ExprSimplifyResult::Simplified(b))
+                match args.pop().unwrap() {
+                    // length checked in is_same_base
+                    ScalarFunctionArgument::Expr(b) => {
+                        Ok(ExprSimplifyResult::Simplified(b))
+                    }
+                    ScalarFunctionArgument::Lambda { .. } => unreachable!(),
+                }
             }
             number => {
                 if number == base {
@@ -249,6 +254,15 @@ impl ScalarUDFImpl for LogFunc {
 /// Returns true if the function is `PowerFunc`
 fn is_pow(func: &ScalarUDF) -> bool {
     func.inner().as_any().downcast_ref::<PowerFunc>().is_some()
+}
+
+fn is_same_base(log_base: &Expr, pow_args: &[ScalarFunctionArgument]) -> bool {
+    match pow_args {
+        [ScalarFunctionArgument::Expr(pow_base), ScalarFunctionArgument::Expr(_)] => {
+            log_base == pow_base
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

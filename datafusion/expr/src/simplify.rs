@@ -110,10 +110,10 @@ impl SimplifyInfo for SimplifyContext<'_> {
 
 /// Was the expression simplified?
 #[derive(Debug)]
-pub enum ExprSimplifyResult {
+pub enum ExprSimplifyResult<T = Expr> {
     /// The function call was simplified to an entirely new Expr
     Simplified(Expr),
     /// The function call could not be simplified, and the arguments
     /// are return unmodified.
-    Original(Vec<Expr>),
+    Original(Vec<T>),
 }

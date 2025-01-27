@@ -1422,9 +1422,14 @@ pub fn from_scalar_function(
 ) -> Result<Expression> {
     let mut arguments: Vec<FunctionArgument> = vec![];
     for arg in &fun.args {
-        arguments.push(FunctionArgument {
-            arg_type: Some(ArgType::Value(producer.handle_expr(arg, schema)?)),
-        });
+        match arg {
+            expr::ScalarFunctionArgument::Expr(expr) => {
+                arguments.push(FunctionArgument {
+                    arg_type: Some(ArgType::Value(producer.handle_expr(expr, schema)?)),
+                });
+            },
+            expr::ScalarFunctionArgument::Lambda { .. } => not_impl_err!("Unsupported scalar function lambda argument")?,
+        }
     }
 
     let function_anchor = producer.register_function(fun.name().to_string());

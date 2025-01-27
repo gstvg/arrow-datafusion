@@ -598,8 +598,7 @@ impl<'a> ConstEvaluator<'a> {
             | Expr::WindowFunction { .. }
             | Expr::GroupingSet(_)
             | Expr::Wildcard { .. }
-            | Expr::Placeholder(_)
-            | Expr::Lambda { .. } => false,
+            | Expr::Placeholder(_) => false,
             Expr::ScalarFunction(ScalarFunction { func, .. }) => {
                 Self::volatility_ok(func.signature().volatility)
             }
@@ -1414,12 +1413,9 @@ impl<S: SimplifyInfo> TreeNodeRewriter for Simplifier<'_, S> {
                 out_expr.rewrite(self)?
             }
             Expr::ScalarFunction(ScalarFunction { func: udf, args }) => {
-                match udf.simplify(args, info)? {
+                match udf.simplify_with_lambda(args, info)? {
                     ExprSimplifyResult::Original(args) => {
-                        Transformed::no(Expr::ScalarFunction(ScalarFunction {
-                            func: udf,
-                            args,
-                        }))
+                        Transformed::no(Expr::ScalarFunction(ScalarFunction::new_udf_with_lambda(udf, args)))
                     }
                     ExprSimplifyResult::Simplified(expr) => Transformed::yes(expr),
                 }

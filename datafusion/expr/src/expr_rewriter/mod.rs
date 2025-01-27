@@ -22,6 +22,7 @@ use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use crate::expr::ScalarFunction;
 use crate::expr::{Alias, Sort, Unnest};
 use crate::logical_plan::Projection;
 use crate::{Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder};
@@ -81,6 +82,7 @@ pub fn normalize_col_with_schemas_and_ambiguity_check(
     schemas: &[&[&DFSchema]],
     using_columns: &[HashSet<Column>],
 ) -> Result<Expr> {
+    return Ok(expr);
     // Normalize column inside Unnest
     if let Expr::Unnest(Unnest { expr }) = expr {
         let e = normalize_col_with_schemas_and_ambiguity_check(
@@ -91,16 +93,48 @@ pub fn normalize_col_with_schemas_and_ambiguity_check(
         return Ok(Expr::Unnest(Unnest { expr: Box::new(e) }));
     }
 
-    expr.transform(|expr| {
-        Ok({
-            if let Expr::Column(c) = expr {
-                let col =
-                    c.normalize_with_schemas_and_ambiguity_check(schemas, using_columns)?;
-                Transformed::yes(Expr::Column(col))
-            } else {
-                Transformed::no(expr)
-            }
-        })
+    expr.transform(|expr| match expr {
+        Expr::ScalarFunction(ScalarFunction { func, args }) => {
+            let lambda_schema = func.inner().lambdas_schemas(&args, schemas[0][0])?;
+
+            let args = std::iter::zip(args, lambda_schema)
+                .map(|(arg, lambda_schema)| match arg {
+                    crate::expr::ScalarFunctionArgument::Expr(expr) => {
+                        Ok(crate::expr::ScalarFunctionArgument::Expr(
+                            normalize_col_with_schemas_and_ambiguity_check(
+                                expr,
+                                schemas,
+                                using_columns,
+                            )?,
+                        ))
+                    }
+                    crate::expr::ScalarFunctionArgument::Lambda { arg_names, expr } => {
+                        let expr = normalize_col_with_schemas_and_ambiguity_check(
+                            expr,
+                            &[&[&DFSchema::try_from(lambda_schema.unwrap()).unwrap()]],
+                            &[],
+                        )?;
+
+                        Ok(crate::expr::ScalarFunctionArgument::Lambda {
+                            arg_names,
+                            expr,
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(Transformed::new(
+                Expr::ScalarFunction(ScalarFunction { func, args }),
+                false,
+                datafusion_common::tree_node::TreeNodeRecursion::Jump,
+            ))
+        }
+        Expr::Column(c) => {
+            let col =
+                c.normalize_with_schemas_and_ambiguity_check(schemas, using_columns)?;
+            Ok(Transformed::yes(Expr::Column(col)))
+        }
+        _ => Ok(Transformed::no(expr)),
     })
     .data()
 }

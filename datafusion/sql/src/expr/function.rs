@@ -22,16 +22,14 @@ use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
     DFSchema, Dependency, Result,
 };
-use datafusion_expr::expr::{ScalarFunction, Unnest};
+use datafusion_expr::expr::{ScalarFunction, ScalarFunctionArgument, Unnest};
 use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{
     expr, qualified_wildcard, wildcard, Expr, ExprFunctionExt, ExprSchemable,
     WindowFrame, WindowFunctionDefinition,
 };
 use sqlparser::ast::{
-    DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction, FunctionArg,
-    FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments,
-    NullTreatment, ObjectName, OrderByExpr, WindowType,
+    DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction, FunctionArg, FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, LambdaFunction, NullTreatment, ObjectName, OrderByExpr, WindowType
 };
 
 /// Suggest a valid function based on an invalid input function name
@@ -239,8 +237,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
 
         // User-defined function (UDF) should have precedence
         if let Some(fm) = self.context_provider.get_function_meta(&name) {
-            let args = self.function_args_to_expr(args, schema, planner_context)?;
-            return Ok(Expr::ScalarFunction(ScalarFunction::new_udf(fm, args)));
+            let args = self.function_args_to_expr_with_lambda(args, schema, planner_context)?;
+            return Ok(Expr::ScalarFunction(ScalarFunction::new_udf_with_lambda(fm, args)));
         }
 
         // Build Unnest expression
@@ -445,6 +443,26 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         args.into_iter()
             .map(|a| self.sql_fn_arg_to_logical_expr(a, schema, planner_context))
             .collect::<Result<Vec<Expr>>>()
+    }
+    
+    pub(super) fn function_args_to_expr_with_lambda(
+        &self,
+        args: Vec<FunctionArg>,
+        schema: &DFSchema,
+        planner_context: &mut PlannerContext,
+    ) -> Result<Vec<ScalarFunctionArgument>> {
+        args.into_iter()
+            .map(|a| {
+                match a {
+                    FunctionArg::Named { name: _, arg: FunctionArgExpr::Expr(sqlparser::ast::Expr::Lambda(LambdaFunction{ params, body })), operator: _ } |
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(sqlparser::ast::Expr::Lambda(LambdaFunction{ params, body }))) => {
+                        Ok(ScalarFunctionArgument::Lambda { arg_names: params.into_iter().map(|i| i.value).collect(), expr: self.sql_expr_to_logical_expr(*body, schema, planner_context)? })
+                    },
+                    a => self.sql_fn_arg_to_logical_expr(a, schema, planner_context).map(ScalarFunctionArgument::Expr)
+                }
+                
+            })
+            .collect::<Result<Vec<ScalarFunctionArgument>>>()
     }
 
     pub(crate) fn check_unnest_arg(arg: &Expr, schema: &DFSchema) -> Result<()> {

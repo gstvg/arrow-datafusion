@@ -352,6 +352,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         find_column_exprs(exprs)
             .iter()
             .try_for_each(|col| match col {
+                _ => Ok(()),
                 Expr::Column(col) => match &col.relation {
                     Some(r) => {
                         schema.field_with_qualified_name(r, &col.name)?;

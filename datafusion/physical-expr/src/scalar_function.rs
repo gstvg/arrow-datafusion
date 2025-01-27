@@ -106,18 +106,25 @@ impl ScalarFunctionExpr {
             .map(|e| e.nullable(schema))
             .collect::<Result<Vec<_>>>()?;
 
-        let arguments = args
+        let (scalar_arguments, lambda_arguments): (Vec<_>, Vec<_>) = args
             .iter()
             .map(|e| {
-                e.as_any()
+                let scalar = e.as_any()
                     .downcast_ref::<Literal>()
-                    .map(|literal| literal.value())
+                    .map(|literal| literal.value());
+                
+                let lambda = e.as_any()
+                    .downcast_ref::<Lambda>()
+                    .map(|lambda| (lambda.args.as_slice(), &lambda.expr));
+
+                (scalar, lambda)
             })
-            .collect::<Vec<_>>();
+            .unzip();
         let ret_args = ReturnTypeArgs {
             arg_types: &arg_types,
-            scalar_arguments: &arguments,
+            scalar_arguments: &scalar_arguments,
             nullables: &nullables,
+            lambda_arguments: &lambda_arguments
         };
         let (return_type, nullable) = fun.return_type_from_args(ret_args)?.into_parts();
         Ok(Self {
@@ -185,7 +192,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
             .iter()
             .map(|e| {
                 match e.as_any().downcast_ref::<Lambda>() {
-                    Some(lambda) => Ok(ColumnarValueOrLambda::Lambda(lambda)),
+                    Some(lambda) => Ok(ColumnarValueOrLambda::Lambda{args: &lambda.args, body: lambda.inner.as_ref()}),
                     None => Ok(ColumnarValueOrLambda::Value(e.evaluate(batch)?))
                 }
             })
@@ -194,7 +201,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
         let input_empty = args.is_empty();
         let input_all_scalar = args
             .iter()
-            .all(|arg| matches!(arg, ColumnarValueOrLambda::Lambda(_) | ColumnarValueOrLambda::Value(ColumnarValue::Scalar(_))));
+            .all(|arg| matches!(arg, ColumnarValueOrLambda::Lambda{..} | ColumnarValueOrLambda::Value(ColumnarValue::Scalar(_))));
 
         // evaluate the function
         let output = self.fun.invoke_with_lambda_args(ScalarFunctionArgs {

@@ -27,7 +27,7 @@ use datafusion_common::{
     arrow_datafusion_err, exec_datafusion_err, exec_err, internal_datafusion_err,
     plan_datafusion_err, DataFusionError, Result, ScalarValue,
 };
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::expr::{ScalarFunction, ScalarFunctionArgument};
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
 use datafusion_expr::{ColumnarValue, Documentation, Expr, ScalarUDF, TypeSignature};
 use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
@@ -167,10 +167,15 @@ impl ScalarUDFImpl for PowerFunc {
                 Ok(ExprSimplifyResult::Simplified(base))
             }
             Expr::ScalarFunction(ScalarFunction { func, mut args })
-                if is_log(&func) && args.len() == 2 && base == args[0] =>
+                if is_log(&func) && is_same_base(&base, &args) =>
             {
-                let b = args.pop().unwrap(); // length checked above
-                Ok(ExprSimplifyResult::Simplified(b))
+                match args.pop().unwrap() {
+                    // length checked in is_same_base
+                    ScalarFunctionArgument::Expr(b) => {
+                        Ok(ExprSimplifyResult::Simplified(b))
+                    }
+                    ScalarFunctionArgument::Lambda { .. } => unreachable!(),
+                }
             }
             _ => Ok(ExprSimplifyResult::Original(vec![base, exponent])),
         }
@@ -184,6 +189,15 @@ impl ScalarUDFImpl for PowerFunc {
 /// Return true if this function call is a call to `Log`
 fn is_log(func: &ScalarUDF) -> bool {
     func.inner().as_any().downcast_ref::<LogFunc>().is_some()
+}
+
+fn is_same_base(pow_base: &Expr, log_args: &[ScalarFunctionArgument]) -> bool {
+    match log_args {
+        [ScalarFunctionArgument::Expr(log_base), ScalarFunctionArgument::Expr(_)] => {
+            pow_base == log_base
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

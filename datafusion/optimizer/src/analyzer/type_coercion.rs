@@ -33,7 +33,7 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::{
     self, Alias, Between, BinaryExpr, Case, Exists, InList, InSubquery, Like,
-    ScalarFunction, Sort, WindowFunction,
+    ScalarFunction, ScalarFunctionArgument, Sort, WindowFunction,
 };
 use datafusion_expr::expr_rewriter::coerce_plan_expr_for_schema;
 use datafusion_expr::expr_schema::cast_subquery;
@@ -490,7 +490,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                     &func,
                 )?;
                 Ok(Transformed::yes(Expr::ScalarFunction(
-                    ScalarFunction::new_udf(func, new_expr),
+                    ScalarFunction::new_udf_with_lambda(func, new_expr),
                 )))
             }
             Expr::AggregateFunction(expr::AggregateFunction {
@@ -561,8 +561,7 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
             | Expr::Wildcard { .. }
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
-            | Expr::OuterReferenceColumn(_, _)
-            | Expr::Lambda { .. } => Ok(Transformed::no(expr)),
+            | Expr::OuterReferenceColumn(_, _) => Ok(Transformed::no(expr)),
         }
     }
 }
@@ -746,17 +745,20 @@ fn get_casted_expr_for_bool_op(expr: Expr, schema: &DFSchema) -> Result<Expr> {
 ///
 /// See the module level documentation for more detail on coercion.
 fn coerce_arguments_for_signature_with_scalar_udf(
-    expressions: Vec<Expr>,
+    expressions: Vec<ScalarFunctionArgument>,
     schema: &DFSchema,
     func: &ScalarUDF,
-) -> Result<Vec<Expr>> {
+) -> Result<Vec<ScalarFunctionArgument>> {
     if expressions.is_empty() {
         return Ok(expressions);
     }
 
     let current_types = expressions
         .iter()
-        .map(|e| e.get_type(schema))
+        .map(|e| match e {
+            ScalarFunctionArgument::Expr(expr) => expr.get_type(schema),
+            ScalarFunctionArgument::Lambda { .. } => Ok(DataType::Null),
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let new_types = data_types_with_scalar_udf(&current_types, func)?;
@@ -764,7 +766,10 @@ fn coerce_arguments_for_signature_with_scalar_udf(
     expressions
         .into_iter()
         .enumerate()
-        .map(|(i, expr)| expr.cast_to(&new_types[i], schema))
+        .map(|(i, expr)| match expr {
+            ScalarFunctionArgument::Expr(expr) => Ok(ScalarFunctionArgument::Expr(expr.cast_to(&new_types[i], schema)?)),
+            lambda => Ok(lambda),
+        })
         .collect()
 }
 

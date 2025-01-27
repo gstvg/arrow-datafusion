@@ -100,7 +100,6 @@ impl TreeNode for Expr {
             Expr::InList(InList { expr, list, .. }) => {
                 (expr, list).apply_ref_elements(f)
             }
-            Expr::Lambda { arg_names, expr } => expr.apply_elements(f)
         }
     }
 
@@ -218,7 +217,7 @@ impl TreeNode for Expr {
                 .update_data(|be| Expr::TryCast(TryCast::new(be, data_type))),
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
                 args.map_elements(f)?.map_data(|new_args| {
-                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
+                    Ok(Expr::ScalarFunction(ScalarFunction::new_udf_with_lambda(
                         func, new_args,
                     )))
                 })?
@@ -282,7 +281,6 @@ impl TreeNode for Expr {
                 .update_data(|(new_expr, new_list)| {
                     Expr::InList(InList::new(new_expr, new_list, negated))
                 }),
-            Expr::Lambda { arg_names, expr } => expr.map_elements(f)?.update_data(|new_expr| Expr::Lambda { arg_names, expr: new_expr })
         })
     }
 }

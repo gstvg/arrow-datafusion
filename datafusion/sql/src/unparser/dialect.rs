@@ -19,7 +19,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use arrow_schema::TimeUnit;
 use datafusion_common::Result;
-use datafusion_expr::Expr;
+use datafusion_expr::expr::ScalarFunctionArgument;
 use regex::Regex;
 use sqlparser::tokenizer::Span;
 use sqlparser::{
@@ -30,7 +30,7 @@ use sqlparser::{
 use super::{utils::character_length_to_sql, utils::date_part_to_sql, Unparser};
 
 pub type ScalarFnToSqlHandler =
-    Box<dyn Fn(&Unparser, &[Expr]) -> Result<Option<ast::Expr>> + Send + Sync>;
+    Box<dyn Fn(&Unparser, &[ScalarFunctionArgument]) -> Result<Option<ast::Expr>> + Send + Sync>;
 
 /// `Dialect` to use for Unparsing
 ///
@@ -148,7 +148,7 @@ pub trait Dialect: Send + Sync {
         &self,
         _unparser: &Unparser,
         _func_name: &str,
-        _args: &[Expr],
+        _args: &[ScalarFunctionArgument],
     ) -> Result<Option<ast::Expr>> {
         Ok(None)
     }
@@ -260,7 +260,7 @@ impl Dialect for PostgreSqlDialect {
         &self,
         unparser: &Unparser,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<Option<ast::Expr>> {
         if func_name == "round" {
             return Ok(Some(
@@ -277,9 +277,9 @@ impl PostgreSqlDialect {
         &self,
         unparser: &Unparser,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<ast::Expr> {
-        let mut args = unparser.function_args_to_sql(args)?;
+        let mut args = unparser.scalar_function_args_to_sql(args)?;
 
         // Enforce the first argument to be Numeric
         if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr))) =
@@ -362,7 +362,7 @@ impl Dialect for DuckDBDialect {
         &self,
         unparser: &Unparser,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<Option<ast::Expr>> {
         if let Some(handler) = self.custom_scalar_fn_overrides.get(func_name) {
             return handler(unparser, args);
@@ -431,7 +431,7 @@ impl Dialect for MySqlDialect {
         &self,
         unparser: &Unparser,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<Option<ast::Expr>> {
         if func_name == "date_part" {
             return date_part_to_sql(unparser, self.date_field_extract_style(), args);
@@ -468,7 +468,7 @@ impl Dialect for SqliteDialect {
         &self,
         unparser: &Unparser,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<Option<ast::Expr>> {
         match func_name {
             "date_part" => {
@@ -613,7 +613,7 @@ impl Dialect for CustomDialect {
         &self,
         unparser: &Unparser,
         func_name: &str,
-        args: &[Expr],
+        args: &[ScalarFunctionArgument],
     ) -> Result<Option<ast::Expr>> {
         match func_name {
             "date_part" => {

@@ -21,6 +21,7 @@ use crate::{OptimizerConfig, OptimizerRule};
 
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::Result;
+use datafusion_expr::expr::ScalarFunctionArgument;
 use datafusion_expr::{Aggregate, Expr, LogicalPlan, LogicalPlanBuilder, Volatility};
 
 /// Optimizer rule that removes constant expressions from `GROUP BY` clause
@@ -106,7 +107,10 @@ fn is_constant_expression(expr: &Expr) -> bool {
             matches!(
                 e.func.signature().volatility,
                 Volatility::Immutable | Volatility::Stable
-            ) && e.args.iter().all(is_constant_expression)
+            ) && e.args.iter().all(|arg| match arg {
+                ScalarFunctionArgument::Expr(expr) => is_constant_expression(expr),
+                ScalarFunctionArgument::Lambda { arg_names: _, expr } => is_constant_expression(expr),
+            })
         }
         _ => false,
     }

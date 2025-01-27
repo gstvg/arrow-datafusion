@@ -17,8 +17,7 @@
 
 use super::{Between, Expr, Like};
 use crate::expr::{
-    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Placeholder,
-    ScalarFunction, TryCast, Unnest, WindowFunction,
+    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Placeholder, ScalarFunction, ScalarFunctionArgument, TryCast, Unnest, WindowFunction
 };
 use crate::type_coercion::binary::get_result_type;
 use crate::type_coercion::functions::{
@@ -29,8 +28,7 @@ use crate::{utils, LogicalPlan, Projection, Subquery, WindowFunctionDefinition};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::{
-    not_impl_err, plan_datafusion_err, plan_err, Column, DataFusionError, ExprSchema,
-    Result, TableReference,
+    not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError, ExprSchema, Result, TableReference
 };
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use std::collections::HashMap;
@@ -211,7 +209,6 @@ impl ExprSchemable for Expr {
                 // Grouping sets do not really have a type and do not appear in projections
                 Ok(DataType::Null)
             }
-            Expr::Lambda { .. } => todo!()
         }
     }
 
@@ -327,7 +324,6 @@ impl ExprSchemable for Expr {
                 // in projections
                 Ok(true)
             }
-            Expr::Lambda { .. } => todo!()
         }
     }
 
@@ -397,9 +393,11 @@ impl ExprSchemable for Expr {
                 self.data_type_and_nullable_with_window_function(schema, window_function)
             }
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                let (arg_types, nullables): (Vec<DataType>, Vec<bool>) = args
-                    .iter()
-                    .map(|e| e.data_type_and_nullable(schema))
+                let (arg_types, nullables): (Vec<DataType>, Vec<bool>) = std::iter::zip(args, func.inner().lambdas_schemas(args, schema)?)
+                    .map(|(e, lambda_schema)| match e {
+                        ScalarFunctionArgument::Expr(expr) => expr.data_type_and_nullable(schema),
+                        ScalarFunctionArgument::Lambda { arg_names: _, expr } => expr.data_type_and_nullable(&DFSchema::try_from(lambda_schema.unwrap()).unwrap()),
+                    })
                     .collect::<Result<Vec<_>>>()?
                     .into_iter()
                     .unzip();
@@ -420,17 +418,19 @@ impl ExprSchemable for Expr {
                         )
                     })?;
 
-                let arguments = args
+                let (scalar_arguments, lambda_arguments): (Vec<_>, Vec<_>) = args
                     .iter()
                     .map(|e| match e {
-                        Expr::Literal(sv) => Some(sv),
-                        _ => None,
+                        ScalarFunctionArgument::Expr(Expr::Literal(sv)) => (Some(sv), None),
+                        ScalarFunctionArgument::Lambda { arg_names, expr } => (None, Some((arg_names.as_slice(), expr))),
+                        _ => (None, None)
                     })
-                    .collect::<Vec<_>>();
+                    .unzip();
                 let args = ReturnTypeArgs {
                     arg_types: &new_data_types,
-                    scalar_arguments: &arguments,
+                    scalar_arguments: &scalar_arguments,
                     nullables: &nullables,
+                    lambda_arguments: &lambda_arguments,
                 };
 
                 let (return_type, nullable) =

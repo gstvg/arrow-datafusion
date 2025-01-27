@@ -382,8 +382,18 @@ pub fn serialize_expr(
             ))
         }
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
+            let args = args.iter()
+                .map(|a| match a {
+                    expr::ScalarFunctionArgument::Expr(expr) => Ok(expr),
+                    expr::ScalarFunctionArgument::Lambda { .. } => Err(Error::General(
+                        "Proto serialization error: Lambda not supported".to_string(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let mut buf = Vec::new();
             let _ = codec.try_encode_udf(func, &mut buf);
+            
             protobuf::LogicalExprNode {
                 expr_type: Some(ExprType::ScalarUdfExpr(protobuf::ScalarUdfExprNode {
                     fun_name: func.name().to_string(),
