@@ -45,7 +45,8 @@ use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
-    expr_vec_fmt, ColumnarValue, ColumnarValueOrLambda, Expr, ReturnTypeArgs, ScalarFunctionArgs, ScalarUDF
+    expr_vec_fmt, ColumnarValue, ColumnarValueOrLambda, Expr, ReturnTypeArgs,
+    ScalarFunctionArgs, ScalarUDF,
 };
 
 /// Physical expression of a scalar function
@@ -92,19 +93,45 @@ impl ScalarFunctionExpr {
         args: Vec<Arc<dyn PhysicalExpr>>,
         schema: &Schema,
     ) -> Result<Self> {
-        let name = fun.name().to_string();
         let arg_types = args
             .iter()
             .map(|e| e.data_type(schema))
             .collect::<Result<Vec<_>>>()?;
 
+        let lambdas_args_names = args
+            .iter()
+            .map(|e| {
+                e.as_any()
+                    .downcast_ref::<Lambda>()
+                    .map(|l| l.args.as_slice())
+            })
+            .collect::<Vec<_>>();
+
+        let lambdas_schemas = fun.inner().lambdas_schemas(
+            &lambdas_args_names,
+            &arg_types,
+            &DFSchema::try_from(schema.clone()).unwrap(),
+        )?;
+
+        let (arg_types, nullables): (Vec<_>, Vec<_>) =
+            std::iter::zip(&args, lambdas_schemas)
+                .map(|(e, lambda_schema)| {
+                    if let Some(lambda) = e.as_any().downcast_ref::<Lambda>() {
+                        let schema = lambda_schema.unwrap();
+                        Ok((
+                            lambda.inner.data_type(&schema)?,
+                            lambda.inner.nullable(&schema)?,
+                        ))
+                    } else {
+                        Ok((e.data_type(schema)?, e.nullable(schema)?))
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .unzip();
+
         // verify that input data types is consistent with function's `TypeSignature`
         data_types_with_scalar_udf(&arg_types, &fun)?;
-
-        let nullables = args
-            .iter()
-            .map(|e| e.nullable(schema))
-            .collect::<Result<Vec<_>>>()?;
 
         let arguments = args
             .iter()
@@ -120,6 +147,9 @@ impl ScalarFunctionExpr {
             nullables: &nullables,
         };
         let (return_type, nullable) = fun.return_type_from_args(ret_args)?.into_parts();
+
+        let name = fun.name().to_string();
+
         Ok(Self {
             fun,
             name,
@@ -183,18 +213,23 @@ impl PhysicalExpr for ScalarFunctionExpr {
         let args = self
             .args
             .iter()
-            .map(|e| {
-                match e.as_any().downcast_ref::<Lambda>() {
-                    Some(lambda) => Ok(ColumnarValueOrLambda::Lambda(lambda)),
-                    None => Ok(ColumnarValueOrLambda::Value(e.evaluate(batch)?))
-                }
+            .map(|e| match e.as_any().downcast_ref::<Lambda>() {
+                Some(lambda) => Ok(ColumnarValueOrLambda::Lambda {
+                    args: &lambda.args,
+                    body: lambda.inner.as_ref(),
+                }),
+                None => Ok(ColumnarValueOrLambda::Value(e.evaluate(batch)?)),
             })
             .collect::<Result<Vec<_>>>()?;
 
         let input_empty = args.is_empty();
-        let input_all_scalar = args
-            .iter()
-            .all(|arg| matches!(arg, ColumnarValueOrLambda::Lambda(_) | ColumnarValueOrLambda::Value(ColumnarValue::Scalar(_))));
+        let input_all_scalar = args.iter().all(|arg| {
+            matches!(
+                arg,
+                ColumnarValueOrLambda::Lambda { .. }
+                    | ColumnarValueOrLambda::Value(ColumnarValue::Scalar(_))
+            )
+        });
 
         // evaluate the function
         let output = self.fun.invoke_with_lambda_args(ScalarFunctionArgs {

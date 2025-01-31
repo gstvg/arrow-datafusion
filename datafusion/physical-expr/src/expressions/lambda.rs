@@ -26,7 +26,7 @@ use arrow::{
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
 };
-use datafusion_common::Result;
+use datafusion_common::{Result, internal_err};
 use datafusion_expr::ColumnarValue;
 
 /// Represents the column at a given index in a RecordBatch
@@ -63,7 +63,8 @@ use datafusion_expr::ColumnarValue;
 /// [logical `Expr::Column`]: https://docs.rs/datafusion/latest/datafusion/logical_expr/enum.Expr.html#variant.Column
 #[derive(Debug, Eq, Clone)]
 pub struct Lambda {
-    inner: Arc<dyn PhysicalExpr>
+    pub(crate) inner: Arc<dyn PhysicalExpr>,
+    pub(crate) args: Vec<String>,
 }
 
 impl PartialEq for Lambda {
@@ -81,9 +82,9 @@ impl Hash for Lambda {
 impl Lambda {
     /// Create a new column expression which references the
     /// column with the given index in the schema.
-    pub fn new(inner: Arc<dyn PhysicalExpr>) -> Self {
+    pub fn new(inner: Arc<dyn PhysicalExpr>, args: Vec<String>) -> Self {
         Self {
-            inner
+            inner, args
         }
     }
 }
@@ -112,7 +113,7 @@ impl PhysicalExpr for Lambda {
 
     /// Evaluate the expression
     fn evaluate(&self, _batch: &RecordBatch) -> Result<ColumnarValue> {
-        panic!()
+        internal_err!("Lambda::evaluate() should not be called")
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {

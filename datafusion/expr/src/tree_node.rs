@@ -100,7 +100,7 @@ impl TreeNode for Expr {
             Expr::InList(InList { expr, list, .. }) => {
                 (expr, list).apply_ref_elements(f)
             }
-            Expr::Lambda { arg_names, expr } => expr.apply_elements(f)
+            Expr::Lambda { arg_names, expr } => Ok(TreeNodeRecursion::Continue)
         }
     }
 
@@ -282,7 +282,7 @@ impl TreeNode for Expr {
                 .update_data(|(new_expr, new_list)| {
                     Expr::InList(InList::new(new_expr, new_list, negated))
                 }),
-            Expr::Lambda { arg_names, expr } => expr.map_elements(f)?.update_data(|new_expr| Expr::Lambda { arg_names, expr: new_expr })
+            lambda @ Expr::Lambda { .. } => Transformed::no(lambda)
         })
     }
 }

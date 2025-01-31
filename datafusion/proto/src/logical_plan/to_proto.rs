@@ -603,6 +603,11 @@ pub fn serialize_expr(
                 })),
             }
         }
+        Expr::Lambda{ .. } => {
+            return Err(Error::General(
+                "Proto serialization error: Lambda not supported".to_string(),
+            ))
+        }
     };
 
     Ok(expr_node)

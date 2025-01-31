@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use crate::expressions::Lambda;
 use crate::ScalarFunctionExpr;
 use crate::{
     expressions::{self, binary, like, similar_to, Column, Literal},
@@ -24,6 +25,7 @@ use crate::{
 };
 
 use arrow::datatypes::Schema;
+use arrow_schema::DataType;
 use datafusion_common::{
     exec_err, not_impl_err, plan_err, DFSchema, Result, ScalarValue, ToDFSchema,
 };
@@ -32,7 +34,7 @@ use datafusion_expr::expr::{Alias, Cast, InList, Placeholder, ScalarFunction};
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::var_provider::VarType;
 use datafusion_expr::{
-    binary_expr, lit, Between, BinaryExpr, Expr, Like, Operator, TryCast,
+    binary_expr, lit, Between, BinaryExpr, Expr, ExprSchemable, Like, Operator, TryCast
 };
 
 /// [PhysicalExpr] evaluate DataFusion expressions such as `A + 1`, or `CAST(c1
@@ -299,20 +301,39 @@ pub fn create_physical_expr(
             execution_props,
         )?),
         Expr::Lambda { .. } => {
-            Err(todo!())
-        },
+            exec_err!("Expr::Lambda should be handled by Expr::ScalarFunction, and can only exist within it")
+        }
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
-            let physical_args =
-                create_physical_exprs(args, input_dfschema, execution_props)?;
-            
-            let lambda_schemas = func.inner().lambdas_schemas(args, input_dfschema)?;
+            let data_types = args
+                .iter()
+                .map(|e| match e {
+                    Expr::Lambda { .. } => Ok(DataType::Null),
+                    _ => e.get_type(input_dfschema)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let lambdas_args_names = args
+                .iter()
+                .map(|e| match e {
+                    Expr::Lambda { arg_names, expr: _ } => Some(arg_names.as_slice()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            let lambda_schemas = func.inner().lambdas_schemas(&lambdas_args_names, &data_types, input_dfschema)?;
 
             let physical_args = std::iter::zip(args, lambda_schemas)
                 .map(|(expr, schema)| match expr {
-                    Expr::Lambda { arg_names, expr } => {
-                        create_physical_expr(expr, &DFSchema::try_from(schema.unwrap()).unwrap(), execution_props)
-                    },
-                    expr => create_physical_expr(expr, input_dfschema, execution_props)
+                    Expr::Lambda { arg_names, expr } => Ok(Arc::new(Lambda::new(
+                        create_physical_expr(
+                            expr,
+                            &DFSchema::try_from(schema.unwrap()).unwrap(),
+                            execution_props,
+                        )?,
+                        arg_names.clone(),
+                    ))
+                        as Arc<dyn PhysicalExpr>),
+                    expr => create_physical_expr(expr, input_dfschema, execution_props),
                 })
                 .collect::<Result<Vec<_>>>()?;
 

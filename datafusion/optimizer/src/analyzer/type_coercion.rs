@@ -754,9 +754,31 @@ fn coerce_arguments_for_signature_with_scalar_udf(
         return Ok(expressions);
     }
 
-    let current_types = expressions
+    let data_types = expressions
         .iter()
-        .map(|e| e.get_type(schema))
+        .map(|e| match e {
+            Expr::Lambda { .. } => Ok(DataType::Null),
+            _ => e.get_type(schema)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let lambdas_args_names = expressions
+        .iter()
+        .map(|e| match e {
+            Expr::Lambda { arg_names, expr: _ } => Some(arg_names.as_slice()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let lambdas_schemas = func.inner().lambdas_schemas(&lambdas_args_names, &data_types, schema)?;
+
+    let current_types = std::iter::zip(&expressions, lambdas_schemas)
+        .map(|(e, lambda_schema)| match e {
+            Expr::Lambda { arg_names, expr } => {
+                expr.get_type(&DFSchema::try_from(lambda_schema.unwrap()).unwrap())
+            }
+            _ => e.get_type(schema),
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let new_types = data_types_with_scalar_udf(&current_types, func)?;
@@ -764,7 +786,10 @@ fn coerce_arguments_for_signature_with_scalar_udf(
     expressions
         .into_iter()
         .enumerate()
-        .map(|(i, expr)| expr.cast_to(&new_types[i], schema))
+        .map(|(i, expr)| match expr {
+            lambda @ Expr::Lambda { .. } => Ok(lambda),
+            _ => expr.cast_to(&new_types[i], schema),
+        })
         .collect()
 }
 

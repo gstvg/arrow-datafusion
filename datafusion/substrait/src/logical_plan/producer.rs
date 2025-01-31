@@ -1369,6 +1369,7 @@ pub fn to_substrait_rex(
             not_impl_err!("Cannot convert {expr:?} to Substrait")
         }
         Expr::Unnest(expr) => not_impl_err!("Cannot convert {expr:?} to Substrait"),
+        Expr::Lambda { .. } => not_impl_err!("Cannot convert {expr:?} to Substrait"),
     }
 }
 
