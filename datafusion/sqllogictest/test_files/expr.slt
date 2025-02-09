@@ -465,6 +465,17 @@ SELECT concat_ws('|','a',NULL,NULL)
 ----
 a
 
+statement ok
+create table foo (a varchar, b varchar) as values ('a', 'b');
+
+query T
+SELECT concat_ws('',a,b,'c') from foo
+----
+abc
+
+statement ok
+drop table foo
+
 query T
 SELECT initcap('')
 ----
@@ -560,7 +571,7 @@ select repeat('-1.2', arrow_cast(3, 'Int32'));
 ----
 -1.2-1.2-1.2
 
-query error DataFusion error: Error during planning: Internal error: Expect TypeSignatureClass::Native\(LogicalType\(Native\(Int64\), Int64\)\) but received Float64
+query error DataFusion error: Error during planning: Internal error: Function 'repeat' expects TypeSignatureClass::Native\(LogicalType\(Native\(Int64\), Int64\)\) but received Float64
 select repeat('-1.2', 3.2);
 
 query T
@@ -2011,7 +2022,7 @@ logical_plan
 physical_plan
 01)ProjectionExec: expr=[min(t.a) FILTER (WHERE t.a > Int64(1))@0 as x]
 02)--AggregateExec: mode=Single, gby=[], aggr=[min(t.a) FILTER (WHERE t.a > Int64(1))]
-03)----MemoryExec: partitions=1, partition_sizes=[1]
+03)----DataSourceExec: partitions=1, partition_sizes=[1]
 
 
 statement ok
@@ -2035,4 +2046,4 @@ select 1 where null between null and 2;
 
 query T
 select 'A' where null between 2 and null;
----
+----
