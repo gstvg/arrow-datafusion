@@ -46,3 +46,13 @@ query ?
 SELECT list_map([1,2,3,4,5], v -> list_repeat("a", v));
 ----
 [[a], [a, a], [a, a, a], [a, a, a, a], [a, a, a, a, a]]
+
+query TT
+EXPLAIN SELECT list_map([1,2,3,4,5], v -> v*2);
+----
+logical_plan
+01)Projection: list_map(List([1, 2, 3, 4, 5]), (v) -> v * Int64(2)) AS list_map(make_array(Int64(1),Int64(2),Int64(3),Int64(4),Int64(5)),(v) -> v * Int64(2))
+02)--EmptyRelation
+physical_plan
+01)ProjectionExec: expr=[list_map([1, 2, 3, 4, 5], lambda(v@0 * 2)) as list_map(make_array(Int64(1),Int64(2),Int64(3),Int64(4),Int64(5)),(v) -> v * Int64(2))]
+02)--PlaceholderRowExec

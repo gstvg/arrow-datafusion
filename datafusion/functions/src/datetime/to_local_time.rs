@@ -558,6 +558,7 @@ mod tests {
                 args: vec![ColumnarValue::Scalar(input)],
                 number_rows: 1,
                 return_type: &expected.data_type(),
+                lambdas: vec![],
             })
             .unwrap();
         match res {

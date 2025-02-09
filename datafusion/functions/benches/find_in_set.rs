@@ -159,6 +159,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     args: args.clone(),
                     number_rows: n_rows,
                     return_type: &DataType::Int32,
+                    lambdas: vec![],
                 }))
             })
         });
@@ -170,6 +171,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     args: args.clone(),
                     number_rows: n_rows,
                     return_type: &DataType::Int32,
+                    lambdas: vec![],
                 }))
             })
         });
@@ -185,6 +187,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     args: args.clone(),
                     number_rows: n_rows,
                     return_type: &DataType::Int32,
+                    lambdas: vec![],
                 }))
             })
         });
@@ -196,6 +199,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     args: args.clone(),
                     number_rows: n_rows,
                     return_type: &DataType::Int32,
+                    lambdas: vec![],
                 }))
             })
         });

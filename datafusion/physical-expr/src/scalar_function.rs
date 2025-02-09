@@ -45,8 +45,7 @@ use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
-    expr_vec_fmt, ColumnarValue, ColumnarValueOrLambda, Expr, ReturnTypeArgs,
-    ScalarFunctionArgs, ScalarUDF,
+    expr_vec_fmt, ColumnarValue, Expr, ReturnTypeArgs, ScalarFunctionArgMetadata, ScalarFunctionArgs, ScalarUDF
 };
 
 /// Physical expression of a scalar function
@@ -93,34 +92,26 @@ impl ScalarFunctionExpr {
         args: Vec<Arc<dyn PhysicalExpr>>,
         schema: &Schema,
     ) -> Result<Self> {
-        let arg_types = args
+        let args_metadata = args
             .iter()
-            .map(|e| e.data_type(schema))
+            .map(|e| match e.as_any().downcast_ref::<Lambda>() {
+                Some(lambda) => Ok(ScalarFunctionArgMetadata::Lambda(lambda.args())),
+                None => Ok(ScalarFunctionArgMetadata::Value(e.data_type(schema)?)),
+            })
             .collect::<Result<Vec<_>>>()?;
 
-        let lambdas_args_names = args
-            .iter()
-            .map(|e| {
-                e.as_any()
-                    .downcast_ref::<Lambda>()
-                    .map(|l| l.args.as_slice())
-            })
-            .collect::<Vec<_>>();
-
-        let lambdas_schemas = fun.inner().lambdas_schemas(
-            &lambdas_args_names,
-            &arg_types,
-            &DFSchema::try_from(schema.clone()).unwrap(),
-        )?;
+        //TOOD: augment every lambda schema with the outer schema
+        let lambdas_schemas = fun.lambdas_schemas(&args_metadata)?;
 
         let (arg_types, nullables): (Vec<_>, Vec<_>) =
             std::iter::zip(&args, lambdas_schemas)
                 .map(|(e, lambda_schema)| {
                     if let Some(lambda) = e.as_any().downcast_ref::<Lambda>() {
                         let schema = lambda_schema.unwrap();
+
                         Ok((
-                            lambda.inner.data_type(&schema)?,
-                            lambda.inner.nullable(&schema)?,
+                            lambda.inner().data_type(&schema)?,
+                            lambda.inner().nullable(&schema)?,
                         ))
                     } else {
                         Ok((e.data_type(schema)?, e.nullable(schema)?))
@@ -214,28 +205,41 @@ impl PhysicalExpr for ScalarFunctionExpr {
             .args
             .iter()
             .map(|e| match e.as_any().downcast_ref::<Lambda>() {
-                Some(lambda) => Ok(ColumnarValueOrLambda::Lambda {
-                    args: &lambda.args,
-                    body: lambda.inner.as_ref(),
-                }),
-                None => Ok(ColumnarValueOrLambda::Value(e.evaluate(batch)?)),
+                Some(_) => Ok(ColumnarValue::Scalar(ScalarValue::Null)),
+                None => Ok(e.evaluate(batch)?),
             })
             .collect::<Result<Vec<_>>>()?;
 
         let input_empty = args.is_empty();
-        let input_all_scalar = args.iter().all(|arg| {
-            matches!(
-                arg,
-                ColumnarValueOrLambda::Lambda { .. }
-                    | ColumnarValueOrLambda::Value(ColumnarValue::Scalar(_))
-            )
-        });
+        let input_all_scalar = args
+            .iter()
+            .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+
+        let lambdas = self
+            .args
+            .iter()
+            .map(|a| {
+                a.as_any()
+                    .downcast_ref::<Lambda>()
+                    .map(|lambda| {
+                        Ok((
+                            lambda.args(),
+                            lambda.inner().as_ref(),
+                            // TODO: traverse lambda.inner, collect columns nodes that aren't arguments of any parent lambda
+                            // and project them below
+                            batch.project(&[])?,
+                        ))
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // evaluate the function
-        let output = self.fun.invoke_with_lambda_args(ScalarFunctionArgs {
+        let output = self.fun.invoke_with_args(ScalarFunctionArgs {
             args,
             number_rows: batch.num_rows(),
             return_type: &self.return_type,
+            lambdas,
         })?;
 
         if let ColumnarValue::Array(array) = &output {

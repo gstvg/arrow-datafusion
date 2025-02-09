@@ -63,8 +63,8 @@ use datafusion_expr::ColumnarValue;
 /// [logical `Expr::Column`]: https://docs.rs/datafusion/latest/datafusion/logical_expr/enum.Expr.html#variant.Column
 #[derive(Debug, Eq, Clone)]
 pub struct Lambda {
-    pub(crate) inner: Arc<dyn PhysicalExpr>,
-    pub(crate) args: Vec<String>,
+    inner: Arc<dyn PhysicalExpr>,
+    args: Vec<String>,
 }
 
 impl PartialEq for Lambda {
@@ -86,6 +86,14 @@ impl Lambda {
         Self {
             inner, args
         }
+    }
+
+    pub fn inner(&self) -> &Arc<dyn PhysicalExpr> {
+        &self.inner
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
     }
 }
 
@@ -117,6 +125,7 @@ impl PhysicalExpr for Lambda {
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        // TODO: expose inner expr somehow
         vec![]
     }
 

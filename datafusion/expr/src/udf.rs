@@ -21,14 +21,17 @@ use crate::expr::schema_name_from_exprs_comma_separated_without_space;
 use crate::simplify::{ExprSimplifyResult, SimplifyInfo};
 use crate::sort_properties::{ExprProperties, SortProperties};
 use crate::{
-    ColumnarValue, Documentation, Expr, ScalarFunctionImplementation, Signature,
+    ColumnarValue, Documentation, Expr, ExprSchemable, ScalarFunctionImplementation,
+    Signature,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::RecordBatch;
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use datafusion_common::{exec_err, not_impl_err, ExprSchema, Result, ScalarValue};
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -235,13 +238,6 @@ impl ScalarUDF {
         self.inner.invoke_with_args(args)
     }
 
-    pub fn invoke_with_lambda_args(
-        &self,
-        args: ScalarFunctionArgs<ColumnarValueOrLambda>,
-    ) -> Result<ColumnarValue> {
-        self.inner.invoke_with_lambda_args(args)
-    }
-
     /// Invoke the function without `args` but number of rows, returning the appropriate result.
     ///
     /// Note: This method is deprecated and will be removed in future releases.
@@ -333,6 +329,62 @@ impl ScalarUDF {
     pub fn documentation(&self) -> Option<&Documentation> {
         self.inner.documentation()
     }
+
+    pub fn lambdas_schemas(
+        &self,
+        args: &[ScalarFunctionArgMetadata],
+    ) -> Result<Vec<Option<Schema>>> {
+        //TOOD: augment every lambda schema with the outer schema
+        let arguments = self.inner().lambdas_arguments(args)?;
+
+        if arguments.len() != args.len() {
+            return exec_err!("{} lambdas_arguments returned {} values instead of {}", self.name(), args.len(), arguments.len())
+        }
+
+        std::iter::zip(args, arguments)
+            .enumerate()
+            .map(|(i, (arg, lambda_args))| match (arg, lambda_args) {
+                (ScalarFunctionArgMetadata::Value(_), None) => Ok(None),
+                (ScalarFunctionArgMetadata::Value(_), Some(_)) => exec_err!("{} {}º argument (0-indexed) is a value but lambdas_arguments result treat it as a lambda", self.name(), i),
+                (ScalarFunctionArgMetadata::Lambda(_), None) => exec_err!("{} {}º argument (0-indexed) is a lambda but lambdas_arguments result treat it as a value", self.name(), i),
+                (ScalarFunctionArgMetadata::Lambda(names), Some(args)) => {
+                    if names.len() > args.len() {
+                        return exec_err!("{} {}º argument (0-indexed), a lambda, supports up to {} arguments, but got {}", self.name(), i, names.len(), args.len())
+                    }
+
+                    let fields = std::iter::zip(*names, args)
+                        .map(|(name, arg)| arg.into_field(name))
+                        .collect::<Fields>();
+
+                    Ok(Some(Schema::new(fields)))
+                }
+            })
+            .collect()
+    }
+
+    pub fn lambdas_schemas_from_args(
+        &self,
+        args: &[Expr],
+        schema: &dyn ExprSchema,
+    ) -> Result<Vec<Option<Schema>>> {
+        let args_metadata = args
+            .iter()
+            .map(|e| match e {
+                Expr::Lambda { arg_names, expr: _ } => Ok(ScalarFunctionArgMetadata::Lambda(arg_names.as_slice())),
+                _ => Ok(ScalarFunctionArgMetadata::Value(e.get_type(schema)?)),
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.lambdas_schemas(&args_metadata)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ScalarFunctionArgMetadata<'a> {
+    /// A columnar value with the given data type
+    Value(DataType),
+    /// A lambda with the given arguments names
+    Lambda(&'a [String]),
 }
 
 impl<F> From<F> for ScalarUDF
@@ -346,22 +398,38 @@ where
 
 /// Arguments passed to [`ScalarUDFImpl::invoke_with_args`] when invoking a
 /// scalar function.
-pub struct ScalarFunctionArgs<'a, T = ColumnarValue> {
+pub struct ScalarFunctionArgs<'a> {
     /// The evaluated arguments to the function
-    pub args: Vec<T>,
+    /// If it's a lambda, will be ColumnarValue::Scalar(ScalarValue::Null)
+    pub args: Vec<ColumnarValue>,
     /// The number of rows in record batch being evaluated
     pub number_rows: usize,
     /// The return type of the scalar function returned (from `return_type` or `return_type_from_exprs`)
     /// when creating the physical expression from the logical expression
     pub return_type: &'a DataType,
+    /// The lambdas passed to the function
+    /// If it's not a lambda it will be None
+    pub lambdas: Vec<Option<ScalarFunctionLambdaArg<'a>>>,
 }
 
-pub enum ColumnarValueOrLambda<'a> {
-    Value(ColumnarValue),
-    Lambda {
-        args: &'a [String],
-        body: &'a dyn PhysicalExpr,
-    },
+pub type ScalarFunctionLambdaArg<'a> = (&'a [String], &'a dyn PhysicalExpr, RecordBatch);
+
+impl ScalarFunctionArgs<'_> {
+    pub fn values_or_enums(&self) -> Vec<ValueOrLambda> {
+        std::iter::zip(&self.args, &self.lambdas)
+            .map(|(arg, lambda)| {
+                lambda
+                    .as_ref()
+                    .map(|(f, p, b)| ValueOrLambda::Lambda((*f, *p, b)))
+                    .unwrap_or(ValueOrLambda::Value(arg))
+            })
+            .collect()
+    }
+}
+
+pub enum ValueOrLambda<'a> {
+    Value(&'a ColumnarValue),
+    Lambda((&'a [String], &'a dyn PhysicalExpr, &'a RecordBatch)),
 }
 
 /// Information about arguments passed to the function
@@ -374,8 +442,8 @@ pub enum ColumnarValueOrLambda<'a> {
 #[derive(Debug)]
 pub struct ReturnTypeArgs<'a> {
     /// The data types of the arguments to the function
-    /// If argument `i` is a lambda, it will be the type returned by the 
-    /// lambda when executed with the schema return from `Self::lambdas_schemas`
+    /// If argument `i` is a lambda, it will be the type returned by the
+    /// lambda when executed with the arguments returned from `Self::lambdas_arguments`
     pub arg_types: &'a [DataType],
     /// Is argument `i` to the function a scalar (constant)
     ///
@@ -645,34 +713,11 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
     /// [`ColumnarValue::values_to_arrays`] can be used to convert the arguments
     /// to arrays, which will likely be simpler code, but be slower.
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        if args.lambdas.iter().any(|l| l.is_some()) {
+            return exec_err!("lambda function called with a default implementation of invoke_with_args");
+        }
+
         self.invoke_batch(&args.args, args.number_rows)
-    }
-
-    fn invoke_with_lambda_args(
-        &self,
-        args: ScalarFunctionArgs<ColumnarValueOrLambda>,
-    ) -> Result<ColumnarValue> {
-        let ScalarFunctionArgs {
-            args,
-            number_rows,
-            return_type,
-        } = args;
-
-        let args = args
-            .into_iter()
-            .map(|arg| match arg {
-                ColumnarValueOrLambda::Value(columnar_value) => Ok(columnar_value),
-                ColumnarValueOrLambda::Lambda { .. } => {
-                    exec_err!("Non lambda scalar function called with lambda")
-                }
-            })
-            .collect::<Result<_>>()?;
-
-        self.invoke_with_args(ScalarFunctionArgs {
-            args,
-            number_rows,
-            return_type,
-        })
     }
 
     /// Invoke the function without `args`, instead the number of rows are provided,
@@ -865,15 +910,47 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
         None
     }
 
-    /// Returns the schema where any lambda argument will run
-    fn lambdas_schemas(
+    /// Returns the arguments that any lambda supports
+    fn lambdas_arguments(
         &self,
-        args: &[Option<&[String]>],
-        data_types: &[DataType],
-        _schema: &dyn ExprSchema,
-    ) -> Result<Vec<Option<Schema>>> {
+        args: &[ScalarFunctionArgMetadata]
+    ) -> Result<Vec<Option<Vec<LambdaArgument>>>> {
         // not_impl_err!("lambda_schemas is not implemented for {self:?}")
         Ok(vec![None; args.len()])
+    }
+}
+
+/// Describes a single argument that a lambda supports
+#[derive(Debug, Clone)]
+pub struct LambdaArgument {
+    data_type: DataType,
+    nullable: bool,
+    /// A map of key-value pairs containing additional custom meta data.
+    metadata: HashMap<String, String>,
+}
+
+impl LambdaArgument {
+    /// Creates a new lambda argument with the given type and nullability
+    pub fn new(data_type: DataType, nullable: bool) -> Self {
+        Self {
+            data_type,
+            nullable,
+            metadata: Default::default(),
+        }
+    }
+
+    /// Sets the metadata of this `LambdaArgument` to be `metadata` and returns self
+    pub fn with_metadata(self, metadata: HashMap<String, String>) -> Self {
+        Self {
+            data_type: self.data_type,
+            nullable: self.nullable,
+            metadata,
+        }
+    }
+
+    /// Converts into a `Field` with the given `name`
+    pub fn into_field(self, name: impl Into<String>) -> Field {
+        Field::new(name, self.data_type, self.nullable).with_metadata(self.metadata)
     }
 }
 

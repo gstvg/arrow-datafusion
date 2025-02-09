@@ -18,11 +18,12 @@
 //! [`ScalarUDFImpl`] definitions for array_length function.
 
 use arrow::array::AsArray;
-use arrow_array::{ListArray, RecordBatch};
+use arrow_array::{ArrayRef, FixedSizeListArray, LargeListArray, ListArray, RecordBatch};
+use arrow_buffer::OffsetBuffer;
 use arrow_schema::{DataType, Field, Schema};
-use datafusion_common::Result;
+use datafusion_common::{exec_err, Result};
 use datafusion_expr::{
-    ColumnarValue, ColumnarValueOrLambda, Documentation, Expr, ExprSchemable, ReturnInfo, ScalarUDFImpl, Signature, Volatility
+    ColumnarValue, Documentation, LambdaArgument, ReturnInfo, ScalarFunctionArgMetadata, ScalarUDFImpl, Signature, Volatility
 };
 use datafusion_macros::user_doc;
 use std::any::Any;
@@ -95,29 +96,56 @@ impl ScalarUDFImpl for ListMap {
         &self,
         args: datafusion_expr::ReturnTypeArgs,
     ) -> Result<ReturnInfo> {
-        let field = Arc::new(Field::new_list_field(args.arg_types[1].clone(), args.nullables[1]));
+        let field = Arc::new(Field::new_list_field(
+            args.arg_types[1].clone(),
+            args.nullables[1],
+        ));
 
         let return_type = match &args.arg_types[0] {
             DataType::List(_) => DataType::List(field),
             DataType::LargeList(_) => DataType::LargeList(field),
-            _ => unreachable!()
+            DataType::FixedSizeList(_, size) => DataType::FixedSizeList(field, *size),
+            _ => unreachable!(),
         };
 
         Ok(ReturnInfo::new(return_type, args.nullables[0]))
     }
 
-    fn invoke_with_lambda_args(
+    fn invoke_with_args(
         &self,
-        args: datafusion_expr::ScalarFunctionArgs<ColumnarValueOrLambda>,
+        args: datafusion_expr::ScalarFunctionArgs,
     ) -> Result<ColumnarValue> {
-        let [ColumnarValueOrLambda::Value(list), ColumnarValueOrLambda::Lambda { args, body }] =
-            args.args.as_slice()
-        else {
-            unreachable!()
-        };
+        let list = &args.args[0];
+        
+        let (args, body, _captures) = args.lambdas[1].as_ref().unwrap();
 
-        let (field, offsets, values, nulls) =
-            list.to_array(1)?.as_list::<i32>().clone().into_parts();
+        enum ListType {
+            List(OffsetBuffer<i32>),
+            LargeList(OffsetBuffer<i64>),
+            FixedSizeList(i32),
+        }
+
+        let (field, list, values, nulls) = match list.data_type() {
+            DataType::List(_) => {
+                let (field, offsets, values, nulls) =
+                    list.to_array(1)?.as_list::<i32>().clone().into_parts();
+
+                (field, ListType::List(offsets), values, nulls)
+            }
+            DataType::LargeList(_) => {
+                let (field, offsets, values, nulls) =
+                    list.to_array(1)?.as_list::<i64>().clone().into_parts();
+
+                (field, ListType::LargeList(offsets), values, nulls)
+            }
+            DataType::FixedSizeList(_, _) => {
+                let (field, size, values, nulls) =
+                    list.to_array(1)?.as_fixed_size_list().clone().into_parts();
+
+                (field, ListType::FixedSizeList(size), values, nulls)
+            }
+            _ => unreachable!(),
+        };
 
         let schema = Schema::new(vec![Field::new(
             &args[0],
@@ -126,39 +154,51 @@ impl ScalarUDFImpl for ListMap {
         )]);
 
         let nullable = body.nullable(&schema)?;
-        
+
         let lambda_batch = RecordBatch::try_new(Arc::new(schema), vec![values])?;
 
-        let values2 = body
+        let mapped_values = body
             .evaluate(&lambda_batch)?
             .into_array(lambda_batch.num_rows())?;
 
-        let field = Arc::new(Field::new_list_field(values2.data_type().clone(), nullable));
+        let field = Arc::new(Field::new_list_field(
+            mapped_values.data_type().clone(),
+            nullable,
+        ));
 
-        let list = ListArray::new(field, offsets, values2, nulls);
+        let list = match list {
+            ListType::List(offsets) => {
+                Arc::new(ListArray::new(field, offsets, mapped_values, nulls)) as ArrayRef
+            }
+            ListType::LargeList(offsets) => {
+                Arc::new(LargeListArray::new(field, offsets, mapped_values, nulls))
+            }
+            ListType::FixedSizeList(size) => {
+                Arc::new(FixedSizeListArray::new(field, size, mapped_values, nulls))
+            }
+        };
 
         Ok(ColumnarValue::Array(Arc::new(list)))
     }
 
-    fn lambdas_schemas(
+    fn lambdas_arguments(
         &self,
-        args: &[Option<&[String]>],
-        data_types: &[DataType],
-        schema: &dyn datafusion_common::ExprSchema,
-    ) -> Result<Vec<Option<Schema>>> {
-        let field = match &data_types[0] {
-            DataType::List(field) => field,
-            DataType::LargeList(field) => field,
-            _ => unreachable!()
+        args: &[ScalarFunctionArgMetadata]
+    ) -> Result<Vec<Option<Vec<LambdaArgument>>>> {
+        let [ScalarFunctionArgMetadata::Value(list), ScalarFunctionArgMetadata::Lambda(_)] = args else {
+            return exec_err!("{} expects a value follewed by a lambda, got {:?}", self.name(), args)
         };
 
-        let schema = Schema::new(vec![Field::new(
-            &args[1].unwrap()[0],
-            field.data_type().clone(),
-            field.is_nullable(),
-        )]);
+        let field = match list {
+            DataType::List(field) => field,
+            DataType::LargeList(field) => field,
+            DataType::FixedSizeList(field, _) => field,
+            _ => unreachable!(),
+        };
 
-        Ok(vec![None, Some(schema)])
+        let value = LambdaArgument::new(field.data_type().clone(), field.is_nullable());
+
+        Ok(vec![None, Some(vec![value])])
     }
 
     fn aliases(&self) -> &[String] {

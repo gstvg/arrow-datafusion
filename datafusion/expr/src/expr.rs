@@ -326,7 +326,7 @@ pub enum Expr {
     OuterReferenceColumn(DataType, Column),
     /// Unnest expression
     Unnest(Unnest),
-    /// Lambda expression
+    /// Lambda expression, should only exist as a scalar function argument
     Lambda{arg_names: Vec<String>, expr: Box<Expr>},
 }
 

@@ -57,6 +57,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                         args: args.clone(),
                         number_rows: size,
                         return_type: &DataType::Utf8View,
+                        lambdas: vec![],
                     }))
                 })
             },
@@ -71,6 +72,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                         args: args.clone(),
                         number_rows: size,
                         return_type: &DataType::Utf8View,
+                        lambdas: vec![],
                     }))
                 })
             },
@@ -83,6 +85,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     args: args.clone(),
                     number_rows: size,
                     return_type: &DataType::Utf8,
+                    lambdas: vec![],
                 }))
             })
         });

@@ -25,7 +25,6 @@ use crate::{
 };
 
 use arrow::datatypes::Schema;
-use arrow_schema::DataType;
 use datafusion_common::{
     exec_err, not_impl_err, plan_err, DFSchema, Result, ScalarValue, ToDFSchema,
 };
@@ -34,7 +33,7 @@ use datafusion_expr::expr::{Alias, Cast, InList, Placeholder, ScalarFunction};
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::var_provider::VarType;
 use datafusion_expr::{
-    binary_expr, lit, Between, BinaryExpr, Expr, ExprSchemable, Like, Operator, TryCast
+    binary_expr, lit, Between, BinaryExpr, Expr, Like, Operator, TryCast
 };
 
 /// [PhysicalExpr] evaluate DataFusion expressions such as `A + 1`, or `CAST(c1
@@ -304,25 +303,10 @@ pub fn create_physical_expr(
             exec_err!("Expr::Lambda should be handled by Expr::ScalarFunction, and can only exist within it")
         }
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
-            let data_types = args
-                .iter()
-                .map(|e| match e {
-                    Expr::Lambda { .. } => Ok(DataType::Null),
-                    _ => e.get_type(input_dfschema)
-                })
-                .collect::<Result<Vec<_>>>()?;
+            //TOOD: augment every lambda schema with the outer schema
+            let lambdas_schemas = func.lambdas_schemas_from_args(args, input_dfschema)?;
 
-            let lambdas_args_names = args
-                .iter()
-                .map(|e| match e {
-                    Expr::Lambda { arg_names, expr: _ } => Some(arg_names.as_slice()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-
-            let lambda_schemas = func.inner().lambdas_schemas(&lambdas_args_names, &data_types, input_dfschema)?;
-
-            let physical_args = std::iter::zip(args, lambda_schemas)
+            let physical_args = std::iter::zip(args, lambdas_schemas)
                 .map(|(expr, schema)| match expr {
                     Expr::Lambda { arg_names, expr } => Ok(Arc::new(Lambda::new(
                         create_physical_expr(

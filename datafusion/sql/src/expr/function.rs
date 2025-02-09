@@ -419,6 +419,12 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 arg: FunctionArgExpr::Wildcard,
                 operator: _,
             } => Ok(wildcard()),
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Lambda(sqlparser::ast::LambdaFunction { params, body }))) => {
+                Ok(Expr::Lambda {
+                    arg_names: params.into_iter().map(|v| v.to_string()).collect(),
+                    expr: Box::new(self.sql_expr_to_logical_expr(*body, schema, planner_context)?),
+                })
+            }
             FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => {
                 self.sql_expr_to_logical_expr(arg, schema, planner_context)
             }

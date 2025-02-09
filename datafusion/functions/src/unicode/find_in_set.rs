@@ -481,6 +481,7 @@ mod tests {
                     args,
                     number_rows: cardinality,
                     return_type: &return_type,
+                    lambdas: vec![],
                 });
                 assert!(result.is_ok());
 
