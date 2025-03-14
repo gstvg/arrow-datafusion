@@ -22,6 +22,52 @@
 statement ok
 set datafusion.sql_parser.dialect = databricks;
 
+statement ok
+CREATE TABLE t AS SELECT 1 as f, [ [ [2, 3], [2] ], [ [1] ], [ [] ] ] as v, 1 as n;
+
+query I?
+SELECT t.n, list_map([], e1 -> t.n) from t;
+----
+1 []
+
+query error
+SELECT t.n, list_map(v, (v, i) -> list_map(v, (v, j) -> list_map([1], v -> n)) ) from t;
+----
+DataFusion error: Execution error: expected list, got Int64
+
+
+query ?
+SELECT list_map(v, (v1, i) -> list_map(v1, (v2, j) -> list_map(v2, v3 -> j)) ) from t;
+----
+[[[0, 0], [1]], [[0]], [[]]]
+
+query I?
+SELECT t.n, list_map([1, 2], (e) -> n) from t;
+----
+1 [1, 1]
+
+# selection pushdown not working yet
+query error
+SELECT list_map([1, 2], (e) -> n) from t;
+----
+DataFusion error: Optimizer rule 'optimize_projections' failed
+caused by
+Schema error: No field named t.n. Valid fields are e.
+
+
+query ?
+SELECT list_map([1, 2], (e, i) -> i) from t;
+----
+[0, 1]
+
+# type coercion not working yet
+query error DataFusion error: Arrow error: Invalid argument error: Invalid arithmetic operation: Int64 \+ Int32
+SELECT list_map([1, 2], (e, i) -> e+i) from t;
+
+#cse
+query error DataFusion error: Internal error: PhysicalExpr Column references column 'n' at index 1 \(zero\-based\) but input schema only has 1 columns: \["n"\]
+select n + 1, list_map([1], n -> n + 1) from t;
+
 query ?
 SELECT list_map([1,2,3,4,5], v -> v*2);
 ----

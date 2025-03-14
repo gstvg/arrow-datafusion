@@ -27,9 +27,9 @@ use crate::udf::ReturnTypeArgs;
 use crate::{utils, LogicalPlan, Projection, Subquery, WindowFunctionDefinition};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{
-    not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError,
-    ExprSchema, Result, TableReference,
+    not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError, ExprSchema, HashSet, Result, TableReference
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
@@ -406,14 +406,39 @@ impl ExprSchemable for Expr {
             }
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
                 //TOOD: augment every lambda schema with the outer schema
-                let lambdas_schemas = func.lambdas_schemas_from_args(args, schema)?;
+
+                let mut columns = HashSet::new();
+
+                self.apply_lambdas2(|expr| {
+                    if let Expr::Column(col) = expr {
+                        columns.insert(col);
+                    }
+                    
+                    Ok(TreeNodeRecursion::Continue)
+                })?;
+
+                let captured_fields = columns
+                    .into_iter()
+                    .filter_map(|column| {
+                        let (data_type, nullable) = schema.data_type_and_nullable(column).ok()?;
+                        let metadata = schema.metadata(column).ok()?;
+
+                        let field = Field::new(column.name(), data_type.clone(), nullable).with_metadata(metadata.clone());
+
+                        Some((column.relation.clone(), Arc::new(field)))
+                    })
+                    .collect::<Vec<_>>();
+
+                let captured_schema = DFSchema::new_with_metadata(captured_fields, Default::default())?;
+
+                let lambdas_schemas = func.lambdas_schemas_from_args(args, &captured_schema)?;
 
                 let (arg_types, nullables): (Vec<DataType>, Vec<bool>) =
                     std::iter::zip(args, lambdas_schemas)
                         .map(|(e, lambda_schema)| match e {
                             Expr::Lambda { arg_names: _, expr } => expr
                                 .data_type_and_nullable(
-                                    &DFSchema::try_from(lambda_schema.unwrap()).unwrap(),
+                                    &lambda_schema.unwrap(),
                                 ),
                             _ => e.data_type_and_nullable(schema),
                         })
@@ -444,10 +469,17 @@ impl ExprSchemable for Expr {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
+
+                let lambdas = args
+                    .iter()
+                    .map(|e| matches!(e, Expr::Lambda { .. }))
+                    .collect::<Vec<_>>();
+
                 let args = ReturnTypeArgs {
                     arg_types: &new_data_types,
                     scalar_arguments: &arguments,
                     nullables: &nullables,
+                    lambdas: &lambdas,
                 };
 
                 let (return_type, nullable) =

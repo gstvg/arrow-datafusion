@@ -457,7 +457,7 @@ pub trait TreeNode: Sized {
 /// * [`TreeNode::rewrite`] to rewrite owned `TreeNode`s
 pub trait TreeNodeVisitor<'n>: Sized {
     /// The node type which is visitable.
-    type Node: TreeNode;
+    type Node;
 
     /// Invoked while traversing down the tree, before any children are visited.
     /// Default implementation continues the recursion.
@@ -497,7 +497,7 @@ pub trait TreeNodeVisitor<'n>: Sized {
 /// * [`TreeNode::visit`] to inspect borrowed `TreeNode`s
 pub trait TreeNodeRewriter: Sized {
     /// The node type which is rewritable.
-    type Node: TreeNode;
+    type Node;
 
     /// Invoked while traversing down the tree before any children are rewritten.
     /// Default implementation returns the node as is and continues recursion.

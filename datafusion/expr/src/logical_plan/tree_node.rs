@@ -803,11 +803,12 @@ impl LogicalPlan {
             f_down: &mut FD,
             f_up: &mut FU,
         ) -> Result<Transformed<LogicalPlan>> {
-            handle_transform_recursion!(
-                f_down(node),
-                |c| transform_down_up_with_subqueries_impl(c, f_down, f_up),
-                f_up
-            )
+            f_down(node)?
+            .transform_children(|n| {
+                n.map_subqueries(|c| transform_down_up_with_subqueries_impl(c, f_down, f_up))?
+                    .transform_sibling(|n| n.map_children(|c| transform_down_up_with_subqueries_impl(c, f_down, f_up)))
+            })?
+            .transform_parent(f_up)
         }
 
         transform_down_up_with_subqueries_impl(self, &mut f_down, &mut f_up)

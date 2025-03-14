@@ -805,6 +805,11 @@ impl DFSchema {
     pub fn functional_dependencies(&self) -> &FunctionalDependencies {
         &self.functional_dependencies
     }
+    
+    /// Get functional dependencies
+    pub fn field_qualifiers(&self) -> &[Option<TableReference>] {
+        &self.field_qualifiers
+    }
 
     /// Iterate over the qualifiers and fields in the DFSchema
     pub fn iter(&self) -> impl Iterator<Item = (Option<&TableReference>, &FieldRef)> {

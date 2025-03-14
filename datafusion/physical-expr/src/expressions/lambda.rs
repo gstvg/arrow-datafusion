@@ -65,6 +65,7 @@ use datafusion_expr::ColumnarValue;
 pub struct Lambda {
     inner: Arc<dyn PhysicalExpr>,
     args: Vec<String>,
+    expose_inner: bool,
 }
 
 impl PartialEq for Lambda {
@@ -84,7 +85,15 @@ impl Lambda {
     /// column with the given index in the schema.
     pub fn new(inner: Arc<dyn PhysicalExpr>, args: Vec<String>) -> Self {
         Self {
-            inner, args
+            inner, args, expose_inner: false
+        }
+    }
+
+    pub fn exposed(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            args: self.args.clone(),
+            expose_inner: true
         }
     }
 
@@ -126,14 +135,26 @@ impl PhysicalExpr for Lambda {
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
         // TODO: expose inner expr somehow
-        vec![]
+        if self.expose_inner {
+            vec![&self.inner]
+        } else {
+            vec![]
+        }
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn PhysicalExpr>>,
+        mut children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        Ok(self)
+        if let Some(inner) = children.pop() {
+            Ok(Arc::new(Self {
+                inner,
+                args: self.args.clone(),
+                expose_inner: self.expose_inner
+            }))
+        } else {
+            Ok(self)
+        }
     }
 }
 

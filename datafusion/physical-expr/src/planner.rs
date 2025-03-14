@@ -311,7 +311,7 @@ pub fn create_physical_expr(
                     Expr::Lambda { arg_names, expr } => Ok(Arc::new(Lambda::new(
                         create_physical_expr(
                             expr,
-                            &DFSchema::try_from(schema.unwrap()).unwrap(),
+                            &schema.unwrap(),
                             execution_props,
                         )?,
                         arg_names.clone(),

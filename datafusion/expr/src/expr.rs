@@ -327,7 +327,10 @@ pub enum Expr {
     /// Unnest expression
     Unnest(Unnest),
     /// Lambda expression, should only exist as a scalar function argument
-    Lambda{arg_names: Vec<String>, expr: Box<Expr>},
+    Lambda {
+        arg_names: Vec<String>,
+        expr: Box<Expr>,
+    },
 }
 
 impl Default for Expr {
@@ -1668,7 +1671,7 @@ impl Expr {
             | Expr::WindowFunction(..)
             | Expr::Literal(..)
             | Expr::Placeholder(..)
-            | Expr::Lambda{..} => false,
+            | Expr::Lambda { .. } => false,
         }
     }
 
@@ -2221,7 +2224,10 @@ impl HashNode for Expr {
                 column.hash(state);
             }
             Expr::Unnest(Unnest { expr: _expr }) => {}
-            Expr::Lambda{arg_names, expr: _expr} => {
+            Expr::Lambda {
+                arg_names,
+                expr: _expr,
+            } => {
                 arg_names.hash(state);
             }
         };
@@ -2512,7 +2518,9 @@ impl Display for SchemaDisplay<'_> {
 
                 write!(f, " {window_frame}")
             }
-            Expr::Lambda{arg_names, expr} => write!(f, "({}) -> {}", arg_names.join(", "), SchemaDisplay(expr)),
+            Expr::Lambda { arg_names, expr } => {
+                write!(f, "({}) -> {}", arg_names.join(", "), SchemaDisplay(expr))
+            }
         }
     }
 }
@@ -2769,8 +2777,10 @@ impl Display for Expr {
             Expr::Placeholder(Placeholder { id, .. }) => write!(f, "{id}"),
             Expr::Unnest(Unnest { expr }) => {
                 write!(f, "{UNNEST_COLUMN_PREFIX}({expr})")
-            },
-            Expr::Lambda{arg_names, expr} => write!(f, "({}) -> {expr}", arg_names.join(", ")),
+            }
+            Expr::Lambda { arg_names, expr } => {
+                write!(f, "({}) -> {expr}", arg_names.join(", "))
+            }
         }
     }
 }

@@ -25,8 +25,11 @@ use crate::{
     Signature,
 };
 use arrow::array::RecordBatch;
-use arrow::datatypes::{DataType, Field, Fields, Schema};
-use datafusion_common::{exec_err, not_impl_err, ExprSchema, Result, ScalarValue};
+use arrow::datatypes::{DataType, Field, Fields};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{
+    exec_err, not_impl_err, DFSchema, ExprSchema, HashSet, Result, ScalarValue,
+};
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
@@ -35,6 +38,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+
+pub const IS_LAMBDA_ARG: &str = "datafusion.is_lambda_arg";
 
 /// Logical representation of a Scalar User Defined Function.
 ///
@@ -339,17 +344,26 @@ impl ScalarUDF {
     pub fn lambdas_schemas(
         &self,
         args: &[ScalarFunctionArgMetadata],
-    ) -> Result<Vec<Option<Schema>>> {
+        captures: &[HashSet<usize>],
+        schema: &DFSchema,
+    ) -> Result<Vec<Option<DFSchema>>> {
+        assert_eq!(args.len(), captures.len());
+
         //TOOD: augment every lambda schema with the outer schema
         let arguments = self.inner().lambdas_arguments(args)?;
 
         if arguments.len() != args.len() {
-            return exec_err!("{} lambdas_arguments returned {} values instead of {}", self.name(), args.len(), arguments.len())
+            return exec_err!(
+                "{} lambdas_arguments returned {} values instead of {}",
+                self.name(),
+                args.len(),
+                arguments.len()
+            );
         }
 
-        std::iter::zip(args, arguments)
+        std::iter::zip(args, arguments).zip(captures)
             .enumerate()
-            .map(|(i, (arg, lambda_args))| match (arg, lambda_args) {
+            .map(|(i, ((arg, lambda_args), captures))| match (arg, lambda_args) {
                 (ScalarFunctionArgMetadata::Value(_), None) => Ok(None),
                 (ScalarFunctionArgMetadata::Value(_), Some(_)) => exec_err!("{} {}º argument (0-indexed) is a value but lambdas_arguments result treat it as a lambda", self.name(), i),
                 (ScalarFunctionArgMetadata::Lambda(_), None) => exec_err!("{} {}º argument (0-indexed) is a lambda but lambdas_arguments result treat it as a value", self.name(), i),
@@ -359,29 +373,81 @@ impl ScalarUDF {
                     }
 
                     let fields = std::iter::zip(*names, args)
-                        .map(|(name, arg)| arg.into_field(name))
-                        .collect::<Fields>();
+                        .map(|(name, mut arg)| {
+                            if let Some(old_value) = arg.metadata.insert(IS_LAMBDA_ARG.into(), "".into()) {
+                                exec_err!("internal datafusion key set: {IS_LAMBDA_ARG}={old_value}")
+                            } else {
+                                Ok(arg.into_field(name))
+                            }
+                        })
+                        .collect::<Result<Fields>>()?;
 
-                    Ok(Some(Schema::new(fields)))
+                    let mut df_schema = DFSchema::from_unqualified_fields(fields, Default::default())?;
+
+                    let mut captures = captures.iter().copied().collect::<Vec<_>>();
+
+                    captures.sort();
+
+                    println!("schema={schema}");
+                    println!("captures={captures:?}\n");
+
+                    let field_qualifiers = captures.iter()
+                        .map(|i| schema.field_qualifiers()[*i].clone())
+                        .collect();
+
+                    let schema = schema.as_arrow().project(&captures)?;
+
+                    df_schema.merge(&DFSchema::from_field_specific_qualified_schema(field_qualifiers, &Arc::new(schema))?);
+
+                    Ok(Some(df_schema))
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()
+            .inspect(|schemas| if schemas.iter().any(|v| v.is_some()) {
+                println!("input={schema}");
+                println!("output={}\n", schemas.iter().map(|s| s.as_ref().map_or("_".into(), |s| s.to_string())).collect::<Vec<_>>().join(", "));
+            })
     }
 
     pub fn lambdas_schemas_from_args(
         &self,
         args: &[Expr],
-        schema: &dyn ExprSchema,
-    ) -> Result<Vec<Option<Schema>>> {
+        schema: &DFSchema,
+    ) -> Result<Vec<Option<DFSchema>>> {
         let args_metadata = args
             .iter()
             .map(|e| match e {
-                Expr::Lambda { arg_names, expr: _ } => Ok(ScalarFunctionArgMetadata::Lambda(arg_names.as_slice())),
+                Expr::Lambda { arg_names, expr: _ } => {
+                    Ok(ScalarFunctionArgMetadata::Lambda(arg_names.as_slice()))
+                }
                 _ => Ok(ScalarFunctionArgMetadata::Value(e.get_type(schema)?)),
             })
             .collect::<Result<Vec<_>>>()?;
 
-        self.lambdas_schemas(&args_metadata)
+        let captures = args
+            .iter()
+            .map(|expr| match expr {
+                Expr::Lambda { arg_names: _, expr } => {
+                    let mut columns = HashSet::new();
+
+                    expr.apply_lambdas2(|n| {
+                        if let Expr::Column(column) = n {
+                            //if not found, it should be a lambda introduced column
+                            if let Ok(index) = schema.index_of_column(column) {
+                                columns.insert(index);
+                            }
+                        }
+
+                        Ok(TreeNodeRecursion::Continue)
+                    })?;
+
+                    Ok(columns)
+                }
+                _ => Ok(HashSet::new()),
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.lambdas_schemas(&args_metadata, &captures, schema)
     }
 }
 
@@ -406,7 +472,7 @@ where
 /// scalar function.
 pub struct ScalarFunctionArgs<'a> {
     /// The evaluated arguments to the function
-    /// If it's a lambda, will be ColumnarValue::Scalar(ScalarValue::Null)
+    /// If it's a lambda, will be `ColumnarValue::Scalar(ScalarValue::Null)`
     pub args: Vec<ColumnarValue>,
     /// The number of rows in record batch being evaluated
     pub number_rows: usize,
@@ -414,28 +480,30 @@ pub struct ScalarFunctionArgs<'a> {
     /// when creating the physical expression from the logical expression
     pub return_type: &'a DataType,
     /// The lambdas passed to the function
-    /// If it's not a lambda it will be None
+    /// If it's not a lambda it will be `None`
     pub lambdas: Vec<Option<ScalarFunctionLambdaArg<'a>>>,
 }
 
-pub type ScalarFunctionLambdaArg<'a> = (&'a [String], &'a dyn PhysicalExpr, RecordBatch);
+pub struct ScalarFunctionLambdaArg<'a> {
+    pub args_names: &'a [String],
+    pub body: &'a dyn PhysicalExpr,
+    pub captures: RecordBatch,
+}
 
-impl ScalarFunctionArgs<'_> {
-    pub fn values_or_enums(&self) -> Vec<ValueOrLambda> {
-        std::iter::zip(&self.args, &self.lambdas)
-            .map(|(arg, lambda)| {
-                lambda
-                    .as_ref()
-                    .map(|(f, p, b)| ValueOrLambda::Lambda((*f, *p, b)))
-                    .unwrap_or(ValueOrLambda::Value(arg))
+impl<'a> ScalarFunctionArgs<'a> {
+    pub fn into_lambda_args(self) -> Vec<ValueOrLambda<'a>> {
+        std::iter::zip(self.args, self.lambdas)
+            .map(|(arg, lambda)| match lambda {
+                Some(lambda) => ValueOrLambda::Lambda(lambda),
+                None => ValueOrLambda::Value(arg),
             })
             .collect()
     }
 }
 
 pub enum ValueOrLambda<'a> {
-    Value(&'a ColumnarValue),
-    Lambda((&'a [String], &'a dyn PhysicalExpr, &'a RecordBatch)),
+    Value(ColumnarValue),
+    Lambda(ScalarFunctionLambdaArg<'a>),
 }
 
 /// Information about arguments passed to the function
@@ -460,6 +528,8 @@ pub struct ReturnTypeArgs<'a> {
     pub scalar_arguments: &'a [Option<&'a ScalarValue>],
     /// Can argument `i` (ever) null?
     pub nullables: &'a [bool],
+    /// Is `i` a lambda?
+    pub lambdas: &'a [bool],
 }
 
 /// Return metadata for this function.
@@ -929,7 +999,7 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
     /// Returns the arguments that any lambda supports
     fn lambdas_arguments(
         &self,
-        args: &[ScalarFunctionArgMetadata]
+        args: &[ScalarFunctionArgMetadata],
     ) -> Result<Vec<Option<Vec<LambdaArgument>>>> {
         // not_impl_err!("lambda_schemas is not implemented for {self:?}")
         Ok(vec![None; args.len()])
