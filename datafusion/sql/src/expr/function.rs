@@ -420,9 +420,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 operator: _,
             } => Ok(wildcard()),
             FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Lambda(sqlparser::ast::LambdaFunction { params, body }))) => {
+                let arg_names = params.into_iter().map(|v| v.to_string()).collect::<Vec<_>>();
                 Ok(Expr::Lambda {
-                    arg_names: params.into_iter().map(|v| v.to_string()).collect(),
-                    expr: Box::new(self.sql_expr_to_logical_expr(*body, schema, planner_context)?),
+                    arg_names: arg_names.clone(),
+                    expr: Box::new(self.sql_expr_to_logical_expr(*body, schema, &mut planner_context.clone().with_lambda_arguments(arg_names))?),
                 })
             }
             FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => {

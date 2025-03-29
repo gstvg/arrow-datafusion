@@ -296,8 +296,10 @@ impl DFSchema {
             return;
         }
 
-        let self_fields: HashSet<(Option<&TableReference>, &FieldRef)> =
-            self.iter().collect();
+        let self_fields: HashSet<(Option<&TableReference>, &str)> = self
+            .iter()
+            .map(|(qualifier, field)| (qualifier, field.name().as_str()))
+            .collect();
         let self_unqualified_names: HashSet<&str> = self
             .inner
             .fields
@@ -310,7 +312,10 @@ impl DFSchema {
         for (qualifier, field) in other_schema.iter() {
             // skip duplicate columns
             let duplicated_field = match qualifier {
-                Some(q) => self_fields.contains(&(Some(q), field)),
+                Some(q) => {
+                    self_fields.contains(&(Some(q), field.name().as_str()))
+                        || self_fields.contains(&(None, field.name().as_str()))
+                }
                 // for unqualified columns, check as unqualified name
                 None => self_unqualified_names.contains(field.name().as_str()),
             };
@@ -805,7 +810,7 @@ impl DFSchema {
     pub fn functional_dependencies(&self) -> &FunctionalDependencies {
         &self.functional_dependencies
     }
-    
+
     /// Get functional dependencies
     pub fn field_qualifiers(&self) -> &[Option<TableReference>] {
         &self.field_qualifiers
@@ -959,6 +964,8 @@ pub trait ExprSchema: std::fmt::Debug {
 
     /// Return the column's datatype and nullability
     fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)>;
+
+    fn df_schema(&self) -> &DFSchema;
 }
 
 // Implement `ExprSchema` for `Arc<DFSchema>`
@@ -978,6 +985,10 @@ impl<P: AsRef<DFSchema> + std::fmt::Debug> ExprSchema for P {
     fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)> {
         self.as_ref().data_type_and_nullable(col)
     }
+
+    fn df_schema(&self) -> &DFSchema {
+        self.as_ref().df_schema()
+    }
 }
 
 impl ExprSchema for DFSchema {
@@ -996,6 +1007,10 @@ impl ExprSchema for DFSchema {
     fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)> {
         let field = self.field_from_column(col)?;
         Ok((field.data_type(), field.is_nullable()))
+    }
+
+    fn df_schema(&self) -> &DFSchema {
+        &self
     }
 }
 

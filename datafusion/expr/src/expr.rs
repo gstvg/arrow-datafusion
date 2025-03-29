@@ -26,7 +26,7 @@ use std::sync::Arc;
 use crate::expr_fn::binary_expr;
 use crate::logical_plan::Subquery;
 use crate::utils::expr_to_columns;
-use crate::Volatility;
+use crate::{Volatility, IS_LAMBDA_ARG};
 use crate::{udaf, ExprSchemable, Operator, Signature, WindowFrame, WindowUDF};
 
 use arrow::datatypes::{DataType, FieldRef};
@@ -35,7 +35,7 @@ use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
 use datafusion_common::{
-    plan_err, Column, DFSchema, HashMap, Result, ScalarValue, Spans, TableReference,
+    plan_err, Column, DFSchema, HashMap, Result, ScalarValue, Spans, TableReference
 };
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use sqlparser::ast::{
@@ -1513,6 +1513,28 @@ impl Expr {
         using_columns
     }
 
+
+    /// Return all references to columns in this expression.
+    ///
+    /// # Example
+    /// ```
+    /// # use std::collections::HashSet;
+    /// # use datafusion_common::Column;
+    /// # use datafusion_expr::col;
+    /// // For an expression `a + (b * a)`
+    /// let expr = col("a") + (col("b") * col("a"));
+    /// let refs = expr.column_refs();
+    /// // refs contains "a" and "b"
+    /// assert_eq!(refs.len(), 2);
+    /// assert!(refs.contains(&Column::new_unqualified("a")));
+    /// assert!(refs.contains(&Column::new_unqualified("b")));
+    /// ```
+    pub fn column_refs_with_lambdas(&self, schema: &DFSchema) -> HashSet<&Column> {
+        let mut using_columns = HashSet::new();
+        self.add_column_refs_with_lambdas(schema, &mut using_columns);
+        using_columns
+    }
+
     /// Adds references to all columns in this expression to the set
     ///
     /// See [`Self::column_refs`] for details
@@ -1520,6 +1542,23 @@ impl Expr {
         self.apply(|expr| {
             if let Expr::Column(col) = expr {
                 set.insert(col);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("traversal is infallible");
+    }
+
+
+    /// Adds references to all columns in this expression to the set
+    /// including those in lambdas that aren't introduced by the lambda itself
+    ///
+    /// See [`Self::column_refs`] for details
+    pub fn add_column_refs_with_lambdas<'a>(&'a self, schema: &DFSchema, set: &mut HashSet<&'a Column>) {
+        self.apply_with_lambdas(schema, |expr, schema| {
+            if let Expr::Column(col) = expr {
+                if !schema.field_from_column(col).is_ok_and(|field | field.metadata().contains_key(IS_LAMBDA_ARG)) {
+                    set.insert(col);
+                }
             }
             Ok(TreeNodeRecursion::Continue)
         })

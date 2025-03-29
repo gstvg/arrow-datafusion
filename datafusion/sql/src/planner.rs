@@ -22,8 +22,7 @@ use std::vec;
 
 use arrow_schema::*;
 use datafusion_common::{
-    field_not_found, internal_err, plan_datafusion_err, DFSchemaRef, Diagnostic,
-    SchemaError,
+    field_not_found, internal_err, plan_datafusion_err, DFSchemaRef, Diagnostic, HashSet, SchemaError
 };
 use sqlparser::ast::TimezoneInfo;
 use sqlparser::ast::{ArrayElemTypeDef, ExactNumberInfo};
@@ -114,6 +113,8 @@ pub struct PlannerContext {
     outer_from_schema: Option<DFSchemaRef>,
     /// The query schema defined by the table
     create_table_schema: Option<DFSchemaRef>,
+    /// The lambda introduced columns names
+    lambdas_arguments: HashSet<String>,
 }
 
 impl Default for PlannerContext {
@@ -131,6 +132,7 @@ impl PlannerContext {
             outer_query_schema: None,
             outer_from_schema: None,
             create_table_schema: None,
+            lambdas_arguments: HashSet::new(),
         }
     }
 
@@ -215,6 +217,16 @@ impl PlannerContext {
     /// specified name
     pub fn get_cte(&self, cte_name: &str) -> Option<&LogicalPlan> {
         self.ctes.get(cte_name).map(|cte| cte.as_ref())
+    }
+
+    pub fn lambdas_arguments(&self) -> &HashSet<String> {
+        &self.lambdas_arguments
+    }
+
+    pub fn with_lambda_arguments(mut self, arguments: impl IntoIterator<Item = String>) -> Self {
+        self.lambdas_arguments.extend(arguments);
+        
+        self
     }
 
     /// Remove the plan of CTE / Subquery for the specified name

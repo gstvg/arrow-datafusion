@@ -601,7 +601,7 @@ fn rewrite_expr(expr: Expr, input: &Projection) -> Result<Transformed<Expr>> {
 ///   columns are collected.
 fn outer_columns<'a>(expr: &'a Expr, columns: &mut HashSet<&'a Column>) {
     // inspect_expr_pre doesn't handle subquery references, so find them explicitly
-    expr.apply(|expr| {
+    expr.apply_lambdas2(|expr| {
         match expr {
             Expr::OuterReferenceColumn(_, col) => {
                 columns.insert(col);

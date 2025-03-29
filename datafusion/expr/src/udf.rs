@@ -33,6 +33,7 @@ use datafusion_common::{
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
+use std::backtrace::Backtrace;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -349,6 +350,10 @@ impl ScalarUDF {
     ) -> Result<Vec<Option<DFSchema>>> {
         assert_eq!(args.len(), captures.len());
 
+        let bt = Backtrace::capture().to_string().lines().skip(10).take(10).collect::<Vec<_>>().join("\n");
+        println!("{bt}");
+        println!("schema={schema}");
+
         //TOOD: augment every lambda schema with the outer schema
         let arguments = self.inner().lambdas_arguments(args)?;
 
@@ -374,7 +379,7 @@ impl ScalarUDF {
 
                     let fields = std::iter::zip(*names, args)
                         .map(|(name, mut arg)| {
-                            if let Some(old_value) = arg.metadata.insert(IS_LAMBDA_ARG.into(), "".into()) {
+                            if let Some(old_value) = arg.metadata.insert(IS_LAMBDA_ARG.into(), String::new()) {
                                 exec_err!("internal datafusion key set: {IS_LAMBDA_ARG}={old_value}")
                             } else {
                                 Ok(arg.into_field(name))
@@ -398,6 +403,8 @@ impl ScalarUDF {
                     let schema = schema.as_arrow().project(&captures)?;
 
                     df_schema.merge(&DFSchema::from_field_specific_qualified_schema(field_qualifiers, &Arc::new(schema))?);
+
+                    df_schema.check_names().unwrap();
 
                     Ok(Some(df_schema))
                 }
@@ -433,7 +440,7 @@ impl ScalarUDF {
                     expr.apply_lambdas2(|n| {
                         if let Expr::Column(column) = n {
                             //if not found, it should be a lambda introduced column
-                            if let Ok(index) = schema.index_of_column(column) {
+                            if let Some(index) = schema.maybe_index_of_column(column) {
                                 columns.insert(index);
                             }
                         }

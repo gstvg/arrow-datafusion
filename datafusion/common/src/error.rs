@@ -786,7 +786,11 @@ macro_rules! arrow_err {
 macro_rules! schema_datafusion_err {
     ($ERR:expr) => {
         $crate::error::DataFusionError::SchemaError(
-            $ERR,
+            {
+                let err = $ERR;
+                println!("{err}\n{}", std::backtrace::Backtrace::capture());
+                err
+            },
             Box::new(Some($crate::error::DataFusionError::get_back_trace())),
         )
     };
@@ -797,7 +801,11 @@ macro_rules! schema_datafusion_err {
 macro_rules! schema_err {
     ($ERR:expr) => {
         Err($crate::error::DataFusionError::SchemaError(
-            $ERR,
+            {
+                let err = $ERR;
+                println!("{err}\n{}", std::backtrace::Backtrace::capture());
+                err
+            },
             Box::new(Some($crate::error::DataFusionError::get_back_trace())),
         ))
     };
