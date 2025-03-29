@@ -101,7 +101,7 @@ impl TreeNode for Expr {
                 (expr, list).apply_ref_elements(f)
             }
             // TODO: apply lambda expr somehow
-            Expr::Lambda { .. } => Ok(TreeNodeRecursion::Continue)
+            Expr::Lambda { expr, .. } => expr.apply_elements(f)
         }
     }
 
@@ -284,7 +284,9 @@ impl TreeNode for Expr {
                     Expr::InList(InList::new(new_expr, new_list, negated))
                 }),
             // TODO: transform lambda expr somehow
-            lambda @ Expr::Lambda { .. } => Transformed::no(lambda),
+            Expr::Lambda { arg_names, expr } => expr
+                .map_elements(f)?
+                .update_data(|expr| Expr::Lambda { arg_names, expr }),
         })
     }
 }
@@ -817,7 +819,7 @@ mod tests {
                 if count > 10 {
                     Ok(TreeNodeRecursion::Stop)
                 } else {
-                    Ok(TreeNodeRecursion::Continue)   
+                    Ok(TreeNodeRecursion::Continue)
                 }
             })
             .unwrap();
