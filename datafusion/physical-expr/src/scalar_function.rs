@@ -363,7 +363,7 @@ pub fn lambdas_schemas_from_args(fun: &ScalarUDF, args: &[Arc<dyn PhysicalExpr>]
             Some(lambda) => {
                 let mut columns = HashSet::new();
 
-                apply_with_lambdas2(lambda.inner(), |n| {
+                lambda.inner().apply(|n| {
                     if let Some(column) = n.as_any().downcast_ref::<Column>() {
                         if let Ok(index) = schema.index_of(column.name()) {
                             columns.insert(index);
@@ -380,34 +380,11 @@ pub fn lambdas_schemas_from_args(fun: &ScalarUDF, args: &[Arc<dyn PhysicalExpr>]
         })
         .collect::<Result<Vec<_>>>()?;
 
-    //TOOD: augment every lambda schema with the outer schema
     fun.lambdas_schemas(
         &args_metadata,
         &captures,
         &DFSchema::try_from(schema.clone()).unwrap(),
     )
-}
-
-pub fn apply_with_lambdas2<
-    'n,
-    F: FnMut(&'n Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
->(
-    this: &'n Arc<dyn PhysicalExpr>,
-    mut f: F,
-) -> Result<TreeNodeRecursion> {
-    #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-    fn apply_impl<'n, F: FnMut(&'n Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>>(
-        node: &'n Arc<dyn PhysicalExpr>,
-        f: &mut F,
-    ) -> Result<TreeNodeRecursion> {
-        if let Some(lambda) = node.as_any().downcast_ref::<Lambda>() {
-            f(node)?.visit_children(|| apply_impl(lambda.inner(), f))
-        } else {
-            f(node)?.visit_children(|| node.apply_children(|c| apply_impl(c, f)))
-        }
-    }
-
-    apply_impl(this, &mut f)
 }
 
 /// Create a physical expression for the UDF.

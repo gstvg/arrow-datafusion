@@ -22,7 +22,8 @@ use std::vec;
 
 use arrow_schema::*;
 use datafusion_common::{
-    field_not_found, internal_err, plan_datafusion_err, DFSchemaRef, Diagnostic, HashSet, SchemaError
+    field_not_found, plan_datafusion_err, DFSchemaRef, Diagnostic, HashSet,
+    SchemaError,
 };
 use sqlparser::ast::TimezoneInfo;
 use sqlparser::ast::{ArrayElemTypeDef, ExactNumberInfo};
@@ -32,7 +33,6 @@ use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
 use datafusion_common::TableReference;
 use datafusion_common::{not_impl_err, plan_err, DFSchema, DataFusionError, Result};
 use datafusion_expr::logical_plan::{LogicalPlan, LogicalPlanBuilder};
-use datafusion_expr::utils::find_column_exprs;
 use datafusion_expr::{col, Expr};
 
 use crate::utils::make_decimal_type;
@@ -223,9 +223,12 @@ impl PlannerContext {
         &self.lambdas_arguments
     }
 
-    pub fn with_lambda_arguments(mut self, arguments: impl IntoIterator<Item = String>) -> Self {
+    pub fn with_lambda_arguments(
+        mut self,
+        arguments: impl IntoIterator<Item = String>,
+    ) -> Self {
         self.lambdas_arguments.extend(arguments);
-        
+
         self
     }
 
@@ -361,10 +364,12 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         schema: &DFSchema,
         exprs: &[Expr],
     ) -> Result<()> {
-        find_column_exprs(exprs)
+        exprs
             .iter()
-            .try_for_each(|col| match col {
-                Expr::Column(col) => match &col.relation {
+            .map(|expr| expr.column_refs_with_lambdas(schema))
+            .flatten()
+            .try_for_each(|col| {
+                match &col.relation {
                     Some(r) => schema.field_with_qualified_name(r, &col.name).map(|_| ()),
                     None => {
                         if !schema.fields_with_unqualified_name(&col.name).is_empty() {
@@ -400,8 +405,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                         err.with_diagnostic(diagnostic)
                     }
                     _ => err,
-                }),
-                _ => internal_err!("Not a column"),
+                })
             })
     }
 

@@ -964,8 +964,6 @@ pub trait ExprSchema: std::fmt::Debug {
 
     /// Return the column's datatype and nullability
     fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)>;
-
-    fn df_schema(&self) -> &DFSchema;
 }
 
 // Implement `ExprSchema` for `Arc<DFSchema>`
@@ -985,10 +983,6 @@ impl<P: AsRef<DFSchema> + std::fmt::Debug> ExprSchema for P {
     fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)> {
         self.as_ref().data_type_and_nullable(col)
     }
-
-    fn df_schema(&self) -> &DFSchema {
-        self.as_ref().df_schema()
-    }
 }
 
 impl ExprSchema for DFSchema {
@@ -1007,10 +1001,6 @@ impl ExprSchema for DFSchema {
     fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)> {
         let field = self.field_from_column(col)?;
         Ok((field.data_type(), field.is_nullable()))
-    }
-
-    fn df_schema(&self) -> &DFSchema {
-        &self
     }
 }
 

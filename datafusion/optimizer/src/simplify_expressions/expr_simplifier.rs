@@ -29,7 +29,7 @@ use arrow::{
 
 use datafusion_common::{
     cast::{as_large_list_array, as_list_array},
-    tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRewriter},
+    tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRecursion, TreeNodeRewriter},
 };
 use datafusion_common::{internal_err, DFSchema, DataFusionError, Result, ScalarValue};
 use datafusion_expr::simplify::ExprSimplifyResult;
@@ -713,6 +713,14 @@ impl<'a, S> Simplifier<'a, S> {
 
 impl<S: SimplifyInfo> TreeNodeRewriter for Simplifier<'_, S> {
     type Node = Expr;
+
+    fn f_down(&mut self, expr: Self::Node) -> Result<Transformed<Expr>> {
+        if matches!(expr, Expr::Lambda { .. }) {
+            Ok(Transformed::new(expr, false, TreeNodeRecursion::Jump))
+        } else {
+            Ok(Transformed::no(expr))
+        }
+    }
 
     /// rewrite the expression simplifying any constant expressions
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {

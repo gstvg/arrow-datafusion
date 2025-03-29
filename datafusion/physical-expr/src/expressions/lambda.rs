@@ -26,7 +26,7 @@ use arrow::{
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
 };
-use datafusion_common::{Result, internal_err};
+use datafusion_common::{internal_err, Result};
 use datafusion_expr::ColumnarValue;
 
 /// Represents the column at a given index in a RecordBatch
@@ -65,7 +65,6 @@ use datafusion_expr::ColumnarValue;
 pub struct Lambda {
     inner: Arc<dyn PhysicalExpr>,
     args: Vec<String>,
-    expose_inner: bool,
 }
 
 impl PartialEq for Lambda {
@@ -81,20 +80,9 @@ impl Hash for Lambda {
 }
 
 impl Lambda {
-    /// Create a new column expression which references the
-    /// column with the given index in the schema.
+    /// Create a new lambda expression with the given body and arguments names
     pub fn new(inner: Arc<dyn PhysicalExpr>, args: Vec<String>) -> Self {
-        Self {
-            inner, args, expose_inner: false
-        }
-    }
-
-    pub fn exposed(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            args: self.args.clone(),
-            expose_inner: true
-        }
+        Self { inner, args }
     }
 
     pub fn inner(&self) -> &Arc<dyn PhysicalExpr> {
@@ -108,38 +96,29 @@ impl Lambda {
 
 impl std::fmt::Display for Lambda {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "lambda({})", self.inner)
+        write!(f, "lambda(({}) -> {})", self.args.join(", "), self.inner)
     }
 }
 
 impl PhysicalExpr for Lambda {
-    /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    /// Get the data type of this expression, given the schema of the input
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
         Ok(DataType::Null)
     }
 
-    /// Decide whether this expression is nullable, given the schema of the input
     fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
         Ok(true)
     }
 
-    /// Evaluate the expression
     fn evaluate(&self, _batch: &RecordBatch) -> Result<ColumnarValue> {
         internal_err!("Lambda::evaluate() should not be called")
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
-        // TODO: expose inner expr somehow
-        if self.expose_inner {
-            vec![&self.inner]
-        } else {
-            vec![]
-        }
+        vec![&self.inner]
     }
 
     fn with_new_children(
@@ -150,20 +129,9 @@ impl PhysicalExpr for Lambda {
             Ok(Arc::new(Self {
                 inner,
                 args: self.args.clone(),
-                expose_inner: self.expose_inner
             }))
         } else {
             Ok(self)
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    
-
-    #[test]
-    fn out_of_bounds_data_type() {
-        
     }
 }

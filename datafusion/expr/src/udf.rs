@@ -26,7 +26,7 @@ use crate::{
 };
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Fields};
-use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
     exec_err, not_impl_err, DFSchema, ExprSchema, HashSet, Result, ScalarValue,
 };
@@ -354,7 +354,6 @@ impl ScalarUDF {
         println!("{bt}");
         println!("schema={schema}");
 
-        //TOOD: augment every lambda schema with the outer schema
         let arguments = self.inner().lambdas_arguments(args)?;
 
         if arguments.len() != args.len() {
@@ -437,7 +436,7 @@ impl ScalarUDF {
                 Expr::Lambda { arg_names: _, expr } => {
                     let mut columns = HashSet::new();
 
-                    expr.apply_lambdas2(|n| {
+                    expr.apply(|n| {
                         if let Expr::Column(column) = n {
                             //if not found, it should be a lambda introduced column
                             if let Some(index) = schema.maybe_index_of_column(column) {

@@ -303,7 +303,6 @@ pub fn create_physical_expr(
             exec_err!("Expr::Lambda should be handled by Expr::ScalarFunction, and can only exist within it")
         }
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
-            //TOOD: augment every lambda schema with the outer schema
             let lambdas_schemas = func.lambdas_schemas_from_args(args, input_dfschema)?;
 
             let physical_args = std::iter::zip(args, lambdas_schemas)

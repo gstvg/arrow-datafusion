@@ -17,12 +17,13 @@
 
 use std::sync::Arc;
 
-use crate::expressions::Column;
+use crate::expressions::{new_expr_with_schema, Column};
 use crate::PhysicalExpr;
 
 use arrow::datatypes::SchemaRef;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{internal_err, Result};
+use datafusion_physical_expr_common::tree_node::ExprContext;
 
 /// Stores the mapping between source expressions and target expressions for a
 /// projection.
@@ -56,27 +57,28 @@ impl ProjectionMapping {
             .enumerate()
             .map(|(expr_idx, (expression, name))| {
                 let target_expr = Arc::new(Column::new(name, expr_idx)) as _;
-                Arc::clone(expression)
-                    .transform_down(|e| match e.as_any().downcast_ref::<Column>() {
+
+                new_expr_with_schema(Arc::clone(expression), Arc::clone(input_schema))?
+                    .transform_down(|e| match e.expr.as_any().downcast_ref::<Column>() {
                         Some(col) => {
                             // Sometimes, an expression and its name in the input_schema
                             // doesn't match. This can cause problems, so we make sure
                             // that the expression name matches with the name in `input_schema`.
                             // Conceptually, `source_expr` and `expression` should be the same.
                             let idx = col.index();
-                            let matching_input_field = input_schema.field(idx);
+                            let matching_input_field = e.data.field(idx);
                             if col.name() != matching_input_field.name() {
                                 return internal_err!("Input field name {} does not match with the projection expression {}",
                                     matching_input_field.name(),col.name())
                                 }
                             let matching_input_column =
                                 Column::new(matching_input_field.name(), idx);
-                            Ok(Transformed::yes(Arc::new(matching_input_column)))
+                            Ok(Transformed::yes(ExprContext{ expr: Arc::new(matching_input_column), data: e.data, children: e.children }))
                         }
                         None => Ok(Transformed::no(e)),
                     })
                     .data()
-                    .map(|source_expr| (source_expr, target_expr))
+                    .map(|source_expr| (source_expr.expr, target_expr))
             })
             .collect::<Result<Vec<_>>>()
             .map(|map| Self { map })

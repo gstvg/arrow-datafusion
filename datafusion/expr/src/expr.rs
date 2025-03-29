@@ -1562,6 +1562,7 @@ impl Expr {
             }
             Ok(TreeNodeRecursion::Continue)
         })
+        .inspect_err(|_| println!("{self}"))
         .expect("traversal is infallible");
     }
 

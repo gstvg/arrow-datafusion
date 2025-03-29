@@ -95,17 +95,6 @@ pub fn new_expr_with_schema(
             data: schema,
             children,
         })
-    } else if let Some(lambda) = expr.as_any().downcast_ref::<Lambda>() {
-        let children = vec![new_expr_with_schema(
-            Arc::clone(lambda.inner()),
-            Arc::clone(&schema),
-        )?];
-
-        Ok(ExprContext {
-            expr: Arc::new(lambda.exposed()),
-            data: schema,
-            children,
-        })
     } else {
         let children = expr
             .children()

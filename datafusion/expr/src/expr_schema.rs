@@ -27,9 +27,10 @@ use crate::udf::ReturnTypeArgs;
 use crate::{utils, LogicalPlan, Projection, Subquery, WindowFunctionDefinition};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
-use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
-    not_impl_err, plan_datafusion_err, plan_err, Column, DataFusionError, ExprSchema, HashSet, Result, TableReference
+    not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError,
+    ExprSchema, HashSet, Result, TableReference,
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
@@ -405,44 +406,58 @@ impl ExprSchemable for Expr {
                 self.data_type_and_nullable_with_window_function(schema, window_function)
             }
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                //TOOD: augment every lambda schema with the outer schema
-
                 let mut columns = HashSet::new();
 
-                self.apply_lambdas2(|expr| {
+                self.apply(|expr| {
                     if let Expr::Column(col) = expr {
                         columns.insert(col);
                     }
-                    
+
                     Ok(TreeNodeRecursion::Continue)
                 })?;
 
-                //let captured_fields = columns
-                //    .into_iter()
-                //    .filter_map(|column| {
-                //        let (data_type, nullable) = schema.data_type_and_nullable(column).ok()?;
-                //        let metadata = schema.metadata(column).ok()?;
-//
-  //                      let field = Field::new(column.name(), data_type.clone(), nullable).with_metadata(metadata.clone());
-//
-  //                      Some((column.relation.clone(), Arc::new(field)))
-    //                })
- //                   .collect::<Vec<_>>();
-//
-  //              let captured_schema = DFSchema::new_with_metadata(captured_fields, Default::default())?;
+                let captured_fields = columns
+                    .iter()
+                    .filter(|column| {
+                        column.relation.is_some()
+                            || columns
+                                .iter()
+                                .find(|other| {
+                                    other.relation.is_some()
+                                        && column.name() == other.name()
+                                })
+                                .is_none()
+                    })
+                    .filter_map(|column| {
+                        let (data_type, nullable) =
+                            schema.data_type_and_nullable(column).ok()?;
+                        let metadata = schema.metadata(column).ok()?;
 
-                let lambdas_schemas = func.lambdas_schemas_from_args(args, schema.df_schema())?;
+                        let field =
+                            Field::new(column.name(), data_type.clone(), nullable)
+                                .with_metadata(metadata.clone());
+
+                        Some((column.relation.clone(), Arc::new(field)))
+                    })
+                    .collect::<Vec<_>>();
+
+                let captured_schema =
+                    DFSchema::new_with_metadata(captured_fields, Default::default())?;
+
+                //let lambdas_schemas = func.lambdas_schemas_from_args(args, schema.df_schema())?;
+                let lambdas_schemas =
+                    func.lambdas_schemas_from_args(args, &captured_schema)?;
 
                 let (arg_types, nullables): (Vec<DataType>, Vec<bool>) =
                     std::iter::zip(args, lambdas_schemas)
                         .map(|(e, lambda_schema)| match e {
-                            Expr::Lambda { arg_names: _, expr } => expr
-                                .data_type_and_nullable(
-                                    &lambda_schema.unwrap(),
-                                ),
+                            Expr::Lambda { arg_names: _, expr } => {
+                                expr.data_type_and_nullable(&lambda_schema.unwrap())
+                            }
                             _ => e.data_type_and_nullable(schema),
                         })
-                        .collect::<Result<Vec<_>>>().inspect_err(|_| println!("{self}"))?
+                        .collect::<Result<Vec<_>>>()
+                        .inspect_err(|_| println!("{self}"))?
                         .into_iter()
                         .unzip();
                 // Verify that function is invoked with correct number and type of arguments as defined in `TypeSignature`
@@ -841,10 +856,6 @@ mod tests {
 
         fn data_type_and_nullable(&self, col: &Column) -> Result<(&DataType, bool)> {
             Ok((self.data_type(col)?, self.nullable(col)?))
-        }
-
-        fn df_schema(&self) -> &DFSchema {
-            unimplemented!()
         }
     }
 }

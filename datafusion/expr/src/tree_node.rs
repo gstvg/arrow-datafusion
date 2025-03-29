@@ -539,31 +539,6 @@ impl Expr {
         }
     }
 
-    /// Similarly to [`Self::apply`], calls `f` on this expr and its inputs
-    /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn apply_lambdas2<'n, F: FnMut(&'n Self) -> Result<TreeNodeRecursion>>(
-        &'n self,
-        mut f: F,
-    ) -> Result<TreeNodeRecursion> {
-        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn apply_impl<'n, F: FnMut(&'n Expr) -> Result<TreeNodeRecursion>>(
-            node: &'n Expr,
-            f: &mut F,
-        ) -> Result<TreeNodeRecursion> {
-            match node {
-                Expr::Lambda {
-                    arg_names: _,
-                    expr: body,
-                } => f(node)?.visit_children(|| apply_impl(body, f)),
-                _ => {
-                    f(node)?.visit_children(|| node.apply_children(|c| apply_impl(c, f)))
-                }
-            }
-        }
-
-        apply_impl(self, &mut f)
-    }
-
     /// Similarly to [`Self::map_children`], rewrites all lambdas that may
     /// appear in expressions such as `list_map([1, 2], v -> v*2)`.
     ///
