@@ -32,8 +32,7 @@ use crate::projection::{
 use crate::stream::RecordBatchStreamAdapter;
 use crate::{ExecutionPlan, Partitioning, SendableRecordBatchStream};
 
-use arrow::datatypes::SchemaRef;
-use arrow_schema::Schema;
+use arrow::datatypes::{Schema, SchemaRef};
 use datafusion_common::{internal_err, plan_err, Result};
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{EquivalenceProperties, LexOrdering, PhysicalSortExpr};
@@ -209,6 +208,18 @@ impl DisplayAs for StreamingTableExec {
 
                 Ok(())
             }
+            DisplayFormatType::TreeRender => {
+                if self.infinite {
+                    writeln!(f, "infinite={}", self.infinite)?;
+                }
+                if let Some(limit) = self.limit {
+                    write!(f, "limit={limit}")?;
+                } else {
+                    write!(f, "limit=None")?;
+                }
+
+                Ok(())
+            }
         }
     }
 }
@@ -291,7 +302,7 @@ impl ExecutionPlan for StreamingTableExec {
         let new_projections = new_projections_for_columns(
             projection,
             &streaming_table_projections
-                .unwrap_or((0..self.schema().fields().len()).collect()),
+                .unwrap_or_else(|| (0..self.schema().fields().len()).collect()),
         );
 
         let mut lex_orderings = vec![];

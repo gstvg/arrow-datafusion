@@ -24,7 +24,10 @@ use arrow::datatypes::{
     DECIMAL256_MAX_PRECISION,
 };
 use arrow::util::pretty::pretty_format_batches;
-use datafusion::datasource::file_format::json::JsonFormatFactory;
+use datafusion::datasource::file_format::json::{JsonFormat, JsonFormatFactory};
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::optimizer::eliminate_nested_union::EliminateNestedUnion;
 use datafusion::optimizer::Optimizer;
 use datafusion_common::parsers::CompressionTypeVariant;
@@ -67,7 +70,7 @@ use datafusion_common::{
 use datafusion_expr::dml::CopyTo;
 use datafusion_expr::expr::{
     self, Between, BinaryExpr, Case, Cast, GroupingSet, InList, Like, ScalarFunction,
-    Unnest,
+    Unnest, WildcardOptions,
 };
 use datafusion_expr::logical_plan::{Extension, UserDefinedLogicalNodeCore};
 use datafusion_expr::{
@@ -110,15 +113,21 @@ fn roundtrip_json_test(proto: &protobuf::LogicalExprNode) {
 #[cfg(not(feature = "json"))]
 fn roundtrip_json_test(_proto: &protobuf::LogicalExprNode) {}
 
-// Given a DataFusion logical Expr, convert it to protobuf and back, using debug formatting to test
-// equality.
 fn roundtrip_expr_test(initial_struct: Expr, ctx: SessionContext) {
     let extension_codec = DefaultLogicalExtensionCodec {};
-    let proto: protobuf::LogicalExprNode =
-        serialize_expr(&initial_struct, &extension_codec)
-            .unwrap_or_else(|e| panic!("Error serializing expression: {:?}", e));
-    let round_trip: Expr =
-        from_proto::parse_expr(&proto, &ctx, &extension_codec).unwrap();
+    roundtrip_expr_test_with_codec(initial_struct, ctx, &extension_codec);
+}
+
+// Given a DataFusion logical Expr, convert it to protobuf and back, using debug formatting to test
+// equality.
+fn roundtrip_expr_test_with_codec(
+    initial_struct: Expr,
+    ctx: SessionContext,
+    codec: &dyn LogicalExtensionCodec,
+) {
+    let proto: protobuf::LogicalExprNode = serialize_expr(&initial_struct, codec)
+        .unwrap_or_else(|e| panic!("Error serializing expression: {:?}", e));
+    let round_trip: Expr = from_proto::parse_expr(&proto, &ctx, codec).unwrap();
 
     assert_eq!(format!("{:?}", &initial_struct), format!("{round_trip:?}"));
 
@@ -970,8 +979,8 @@ async fn roundtrip_expr_api() -> Result<()> {
         stddev_pop(lit(2.2)),
         approx_distinct(lit(2)),
         approx_median(lit(2)),
-        approx_percentile_cont(lit(2), lit(0.5), None),
-        approx_percentile_cont(lit(2), lit(0.5), Some(lit(50))),
+        approx_percentile_cont(lit(2).sort(true, false), lit(0.5), None),
+        approx_percentile_cont(lit(2).sort(true, false), lit(0.5), Some(lit(50))),
         approx_percentile_cont_with_weight(lit(2), lit(1), lit(0.5)),
         grouping(lit(1)),
         bit_and(lit(2)),
@@ -1494,20 +1503,6 @@ fn round_trip_scalar_values_and_data_types() {
                 Field::new("b", DataType::Boolean, false),
                 ScalarValue::from(false),
             )
-            .with_scalar(
-                Field::new(
-                    "c",
-                    DataType::Dictionary(
-                        Box::new(DataType::UInt16),
-                        Box::new(DataType::Utf8),
-                    ),
-                    false,
-                ),
-                ScalarValue::Dictionary(
-                    Box::new(DataType::UInt16),
-                    Box::new("value".into()),
-                ),
-            )
             .build()
             .unwrap(),
         ScalarValue::try_from(&DataType::Struct(Fields::from(vec![
@@ -1518,25 +1513,6 @@ fn round_trip_scalar_values_and_data_types() {
         ScalarValue::try_from(&DataType::Struct(Fields::from(vec![
             Field::new("a", DataType::Int32, true),
             Field::new("b", DataType::Boolean, false),
-            Field::new(
-                "c",
-                DataType::Dictionary(
-                    Box::new(DataType::UInt16),
-                    Box::new(DataType::Binary),
-                ),
-                false,
-            ),
-            Field::new(
-                "d",
-                DataType::new_list(
-                    DataType::Dictionary(
-                        Box::new(DataType::UInt16),
-                        Box::new(DataType::Binary),
-                    ),
-                    false,
-                ),
-                false,
-            ),
         ])))
         .unwrap(),
         ScalarValue::try_from(&DataType::Map(
@@ -1815,45 +1791,6 @@ fn round_trip_datatype() {
     }
 }
 
-// See https://github.com/apache/datafusion/issues/14173 to remove deprecated dict_id
-#[allow(deprecated)]
-#[test]
-fn roundtrip_dict_id() -> Result<()> {
-    let dict_id = 42;
-    let field = Field::new(
-        "keys",
-        DataType::List(Arc::new(Field::new_dict(
-            "item",
-            DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
-            true,
-            dict_id,
-            false,
-        ))),
-        false,
-    );
-    let schema = Arc::new(Schema::new(vec![field]));
-
-    // encode
-    let mut buf: Vec<u8> = vec![];
-    let schema_proto: protobuf::Schema = schema.try_into().unwrap();
-    schema_proto.encode(&mut buf).unwrap();
-
-    // decode
-    let schema_proto = protobuf::Schema::decode(buf.as_slice()).unwrap();
-    let decoded: Schema = (&schema_proto).try_into()?;
-
-    // assert
-    let keys = decoded.fields().iter().last().unwrap();
-    match keys.data_type() {
-        DataType::List(field) => {
-            assert_eq!(field.dict_id(), Some(dict_id), "dict_id should be retained");
-        }
-        _ => panic!("Invalid type"),
-    }
-
-    Ok(())
-}
-
 #[test]
 fn roundtrip_null_scalar_values() {
     let test_types = vec![
@@ -2101,7 +2038,11 @@ fn roundtrip_unnest() {
 
 #[test]
 fn roundtrip_wildcard() {
-    let test_expr = wildcard();
+    #[expect(deprecated)]
+    let test_expr = Expr::Wildcard {
+        qualifier: None,
+        options: Box::new(WildcardOptions::default()),
+    };
 
     let ctx = SessionContext::new();
     roundtrip_expr_test(test_expr, ctx);
@@ -2109,7 +2050,11 @@ fn roundtrip_wildcard() {
 
 #[test]
 fn roundtrip_qualified_wildcard() {
-    let test_expr = qualified_wildcard("foo");
+    #[expect(deprecated)]
+    let test_expr = Expr::Wildcard {
+        qualifier: Some("foo".into()),
+        options: Box::new(WildcardOptions::default()),
+    };
 
     let ctx = SessionContext::new();
     roundtrip_expr_test(test_expr, ctx);
@@ -2246,8 +2191,7 @@ fn roundtrip_aggregate_udf() {
     roundtrip_expr_test(test_expr, ctx);
 }
 
-#[test]
-fn roundtrip_scalar_udf() {
+fn dummy_udf() -> ScalarUDF {
     let scalar_fn = Arc::new(|args: &[ColumnarValue]| {
         let ColumnarValue::Array(array) = &args[0] else {
             panic!("should be array")
@@ -2255,13 +2199,18 @@ fn roundtrip_scalar_udf() {
         Ok(ColumnarValue::from(Arc::new(array.clone()) as ArrayRef))
     });
 
-    let udf = create_udf(
+    create_udf(
         "dummy",
         vec![DataType::Utf8],
         DataType::Utf8,
         Volatility::Immutable,
         scalar_fn,
-    );
+    )
+}
+
+#[test]
+fn roundtrip_scalar_udf() {
+    let udf = dummy_udf();
 
     let test_expr = Expr::ScalarFunction(ScalarFunction::new_udf(
         Arc::new(udf.clone()),
@@ -2271,7 +2220,57 @@ fn roundtrip_scalar_udf() {
     let ctx = SessionContext::new();
     ctx.register_udf(udf);
 
-    roundtrip_expr_test(test_expr, ctx);
+    roundtrip_expr_test(test_expr.clone(), ctx);
+
+    // Now test loading the UDF without registering it in the context, but rather creating it in the
+    // extension codec.
+    #[derive(Debug)]
+    struct DummyUDFExtensionCodec;
+
+    impl LogicalExtensionCodec for DummyUDFExtensionCodec {
+        fn try_decode(
+            &self,
+            _buf: &[u8],
+            _inputs: &[LogicalPlan],
+            _ctx: &SessionContext,
+        ) -> Result<Extension> {
+            not_impl_err!("LogicalExtensionCodec is not provided")
+        }
+
+        fn try_encode(&self, _node: &Extension, _buf: &mut Vec<u8>) -> Result<()> {
+            not_impl_err!("LogicalExtensionCodec is not provided")
+        }
+
+        fn try_decode_table_provider(
+            &self,
+            _buf: &[u8],
+            _table_ref: &TableReference,
+            _schema: SchemaRef,
+            _ctx: &SessionContext,
+        ) -> Result<Arc<dyn TableProvider>> {
+            not_impl_err!("LogicalExtensionCodec is not provided")
+        }
+
+        fn try_encode_table_provider(
+            &self,
+            _table_ref: &TableReference,
+            _node: Arc<dyn TableProvider>,
+            _buf: &mut Vec<u8>,
+        ) -> Result<()> {
+            not_impl_err!("LogicalExtensionCodec is not provided")
+        }
+
+        fn try_decode_udf(&self, name: &str, _buf: &[u8]) -> Result<Arc<ScalarUDF>> {
+            if name == "dummy" {
+                Ok(Arc::new(dummy_udf()))
+            } else {
+                Err(DataFusionError::Internal(format!("UDF {name} not found")))
+            }
+        }
+    }
+
+    let ctx = SessionContext::new();
+    roundtrip_expr_test_with_codec(test_expr, ctx, &DummyUDFExtensionCodec)
 }
 
 #[test]
@@ -2621,5 +2620,35 @@ async fn roundtrip_union_query() -> Result<()> {
         format!("{}", plan.display_indent_schema()),
         format!("{}", unnested.display_indent_schema()),
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn roundtrip_custom_listing_tables_schema() -> Result<()> {
+    let ctx = SessionContext::new();
+    // Make sure during round-trip, constraint information is preserved
+    let file_format = JsonFormat::default();
+    let table_partition_cols = vec![("part".to_owned(), DataType::Int64)];
+    let data = "../core/tests/data/partitioned_table_json";
+    let listing_table_url = ListingTableUrl::parse(data)?;
+    let listing_options = ListingOptions::new(Arc::new(file_format))
+        .with_table_partition_cols(table_partition_cols);
+
+    let config = ListingTableConfig::new(listing_table_url)
+        .with_listing_options(listing_options)
+        .infer_schema(&ctx.state())
+        .await?;
+
+    ctx.register_table("hive_style", Arc::new(ListingTable::try_new(config)?))?;
+
+    let plan = ctx
+        .sql("SELECT part, value FROM hive_style LIMIT 1")
+        .await?
+        .logical_plan()
+        .clone();
+
+    let bytes = logical_plan_to_bytes(&plan)?;
+    let new_plan = logical_plan_from_bytes(&bytes, &ctx)?;
+    assert_eq!(plan, new_plan);
     Ok(())
 }

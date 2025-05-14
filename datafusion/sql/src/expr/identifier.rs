@@ -15,14 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow_schema::Field;
+use arrow::datatypes::Field;
 use datafusion_common::{
     internal_err, not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema,
     DataFusionError, Result, Span, TableReference,
 };
 use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{Case, Expr};
-use sqlparser::ast::{Expr as SQLExpr, Ident};
+use sqlparser::ast::{CaseWhen, Expr as SQLExpr, Ident};
 
 use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_expr::UNNAMED_TABLE;
@@ -229,8 +229,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     pub(super) fn sql_case_identifier_to_expr(
         &self,
         operand: Option<Box<SQLExpr>>,
-        conditions: Vec<SQLExpr>,
-        results: Vec<SQLExpr>,
+        conditions: Vec<CaseWhen>,
         else_result: Option<Box<SQLExpr>>,
         schema: &DFSchema,
         planner_context: &mut PlannerContext,
@@ -244,13 +243,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         } else {
             None
         };
-        let when_expr = conditions
+        let when_then_expr = conditions
             .into_iter()
-            .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
-            .collect::<Result<Vec<_>>>()?;
-        let then_expr = results
-            .into_iter()
-            .map(|e| self.sql_expr_to_logical_expr(e, schema, planner_context))
+            .map(|e| {
+                Ok((
+                    Box::new(self.sql_expr_to_logical_expr(
+                        e.condition,
+                        schema,
+                        planner_context,
+                    )?),
+                    Box::new(self.sql_expr_to_logical_expr(
+                        e.result,
+                        schema,
+                        planner_context,
+                    )?),
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         let else_expr = if let Some(e) = else_result {
             Some(Box::new(self.sql_expr_to_logical_expr(
@@ -262,15 +270,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             None
         };
 
-        Ok(Expr::Case(Case::new(
-            expr,
-            when_expr
-                .iter()
-                .zip(then_expr.iter())
-                .map(|(w, t)| (Box::new(w.to_owned()), Box::new(t.to_owned())))
-                .collect(),
-            else_expr,
-        )))
+        Ok(Expr::Case(Case::new(expr, when_then_expr, else_expr)))
     }
 }
 

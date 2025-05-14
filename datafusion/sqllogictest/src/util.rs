@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use datafusion_common::{exec_datafusion_err, Result};
+use datafusion::common::{exec_datafusion_err, Result};
 use itertools::Itertools;
 use log::Level::Warn;
 use log::{info, log_enabled, warn};
@@ -105,4 +105,8 @@ pub fn df_value_validator(
     }
 
     normalized_actual == normalized_expected
+}
+
+pub fn is_spark_path(relative_path: &Path) -> bool {
+    relative_path.starts_with("spark/")
 }

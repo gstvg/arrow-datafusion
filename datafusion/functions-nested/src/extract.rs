@@ -19,25 +19,30 @@
 
 use arrow::array::{
     Array, ArrayRef, ArrowNativeTypeOp, Capacities, GenericListArray, Int64Array,
-    MutableArrayData, NullBufferBuilder, OffsetSizeTrait,
+    MutableArrayData, NullArray, NullBufferBuilder, OffsetSizeTrait,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::DataType;
-use arrow_schema::DataType::{FixedSizeList, LargeList, List};
-use arrow_schema::Field;
+use arrow::datatypes::{
+    DataType::{FixedSizeList, LargeList, List, Null},
+    Field,
+};
 use datafusion_common::cast::as_int64_array;
 use datafusion_common::cast::as_large_list_array;
 use datafusion_common::cast::as_list_array;
+use datafusion_common::utils::ListCoercion;
 use datafusion_common::{
-    exec_err, internal_datafusion_err, plan_err, DataFusionError, Result,
+    exec_err, internal_datafusion_err, plan_err, utils::take_function_args,
+    DataFusionError, Result,
 };
-use datafusion_expr::{ArrayFunctionSignature, Expr, TypeSignature};
+use datafusion_expr::{
+    ArrayFunctionArgument, ArrayFunctionSignature, Expr, TypeSignature,
+};
 use datafusion_expr::{
     ColumnarValue, Documentation, ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_macros::user_doc;
 use std::any::Any;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::utils::make_scalar_function;
@@ -158,21 +163,17 @@ impl ScalarUDFImpl for ArrayElement {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match &arg_types[0] {
-            List(field)
-            | LargeList(field)
-            | FixedSizeList(field, _) => Ok(field.data_type().clone()),
-            _ => plan_err!(
-                "ArrayElement can only accept List, LargeList or FixedSizeList as the first argument"
-            ),
+            Null => Ok(Null),
+            List(field) | LargeList(field) => Ok(field.data_type().clone()),
+            arg_type => plan_err!("{} does not support type {arg_type}", self.name()),
         }
     }
 
-    fn invoke_batch(
+    fn invoke_with_args(
         &self,
-        args: &[ColumnarValue],
-        _number_rows: usize,
+        args: datafusion_expr::ScalarFunctionArgs,
     ) -> Result<ColumnarValue> {
-        make_scalar_function(array_element_inner)(args)
+        make_scalar_function(array_element_inner)(&args.args)
     }
 
     fn aliases(&self) -> &[String] {
@@ -192,25 +193,23 @@ impl ScalarUDFImpl for ArrayElement {
 /// For example:
 /// > array_element(\[1, 2, 3], 2) -> 2
 fn array_element_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
-    if args.len() != 2 {
-        return exec_err!("array_element needs two arguments");
-    }
+    let [array, indexes] = take_function_args("array_element", args)?;
 
-    match &args[0].data_type() {
+    match &array.data_type() {
+        Null => Ok(Arc::new(NullArray::new(array.len()))),
         List(_) => {
-            let array = as_list_array(&args[0])?;
-            let indexes = as_int64_array(&args[1])?;
+            let array = as_list_array(&array)?;
+            let indexes = as_int64_array(&indexes)?;
             general_array_element::<i32>(array, indexes)
         }
         LargeList(_) => {
-            let array = as_large_list_array(&args[0])?;
-            let indexes = as_int64_array(&args[1])?;
+            let array = as_large_list_array(&array)?;
+            let indexes = as_int64_array(&indexes)?;
             general_array_element::<i64>(array, indexes)
         }
-        _ => exec_err!(
-            "array_element does not support type: {:?}",
-            args[0].data_type()
-        ),
+        arg_type => {
+            exec_err!("array_element does not support type {arg_type}")
+        }
     }
 }
 
@@ -222,6 +221,10 @@ where
     i64: TryInto<O>,
 {
     let values = array.values();
+    if values.data_type().is_null() {
+        return Ok(Arc::new(NullArray::new(array.len())));
+    }
+
     let original_data = values.to_data();
     let capacity = Capacities::Array(original_data.len());
 
@@ -235,8 +238,7 @@ where
     {
         let index: O = index.try_into().map_err(|_| {
             DataFusionError::Execution(format!(
-                "array_element got invalid index: {}",
-                index
+                "array_element got invalid index: {index}"
             ))
         })?;
         // 0 ~ len - 1
@@ -329,16 +331,23 @@ impl ArraySlice {
         Self {
             signature: Signature::one_of(
                 vec![
-                    TypeSignature::ArraySignature(
-                        ArrayFunctionSignature::ArrayAndIndexes(
-                            NonZeroUsize::new(2).expect("2 is non-zero"),
-                        ),
-                    ),
-                    TypeSignature::ArraySignature(
-                        ArrayFunctionSignature::ArrayAndIndexes(
-                            NonZeroUsize::new(3).expect("3 is non-zero"),
-                        ),
-                    ),
+                    TypeSignature::ArraySignature(ArrayFunctionSignature::Array {
+                        arguments: vec![
+                            ArrayFunctionArgument::Array,
+                            ArrayFunctionArgument::Index,
+                            ArrayFunctionArgument::Index,
+                        ],
+                        array_coercion: None,
+                    }),
+                    TypeSignature::ArraySignature(ArrayFunctionSignature::Array {
+                        arguments: vec![
+                            ArrayFunctionArgument::Array,
+                            ArrayFunctionArgument::Index,
+                            ArrayFunctionArgument::Index,
+                            ArrayFunctionArgument::Index,
+                        ],
+                        array_coercion: None,
+                    }),
                 ],
                 Volatility::Immutable,
             ),
@@ -385,12 +394,11 @@ impl ScalarUDFImpl for ArraySlice {
         Ok(arg_types[0].clone())
     }
 
-    fn invoke_batch(
+    fn invoke_with_args(
         &self,
-        args: &[ColumnarValue],
-        _number_rows: usize,
+        args: datafusion_expr::ScalarFunctionArgs,
     ) -> Result<ColumnarValue> {
-        make_scalar_function(array_slice_inner)(args)
+        make_scalar_function(array_slice_inner)(&args.args)
     }
 
     fn aliases(&self) -> &[String] {
@@ -664,7 +672,15 @@ pub(super) struct ArrayPopFront {
 impl ArrayPopFront {
     pub fn new() -> Self {
         Self {
-            signature: Signature::array(Volatility::Immutable),
+            signature: Signature {
+                type_signature: TypeSignature::ArraySignature(
+                    ArrayFunctionSignature::Array {
+                        arguments: vec![ArrayFunctionArgument::Array],
+                        array_coercion: Some(ListCoercion::FixedSizedListToList),
+                    },
+                ),
+                volatility: Volatility::Immutable,
+            },
             aliases: vec![String::from("list_pop_front")],
         }
     }
@@ -686,12 +702,11 @@ impl ScalarUDFImpl for ArrayPopFront {
         Ok(arg_types[0].clone())
     }
 
-    fn invoke_batch(
+    fn invoke_with_args(
         &self,
-        args: &[ColumnarValue],
-        _number_rows: usize,
+        args: datafusion_expr::ScalarFunctionArgs,
     ) -> Result<ColumnarValue> {
-        make_scalar_function(array_pop_front_inner)(args)
+        make_scalar_function(array_pop_front_inner)(&args.args)
     }
 
     fn aliases(&self) -> &[String] {
@@ -764,7 +779,15 @@ pub(super) struct ArrayPopBack {
 impl ArrayPopBack {
     pub fn new() -> Self {
         Self {
-            signature: Signature::array(Volatility::Immutable),
+            signature: Signature {
+                type_signature: TypeSignature::ArraySignature(
+                    ArrayFunctionSignature::Array {
+                        arguments: vec![ArrayFunctionArgument::Array],
+                        array_coercion: Some(ListCoercion::FixedSizedListToList),
+                    },
+                ),
+                volatility: Volatility::Immutable,
+            },
             aliases: vec![String::from("list_pop_back")],
         }
     }
@@ -786,12 +809,11 @@ impl ScalarUDFImpl for ArrayPopBack {
         Ok(arg_types[0].clone())
     }
 
-    fn invoke_batch(
+    fn invoke_with_args(
         &self,
-        args: &[ColumnarValue],
-        _number_rows: usize,
+        args: datafusion_expr::ScalarFunctionArgs,
     ) -> Result<ColumnarValue> {
-        make_scalar_function(array_pop_back_inner)(args)
+        make_scalar_function(array_pop_back_inner)(&args.args)
     }
 
     fn aliases(&self) -> &[String] {
@@ -805,23 +827,20 @@ impl ScalarUDFImpl for ArrayPopBack {
 
 /// array_pop_back SQL function
 fn array_pop_back_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
-    if args.len() != 1 {
-        return exec_err!("array_pop_back needs one argument");
-    }
+    let [array] = take_function_args("array_pop_back", args)?;
 
-    let array_data_type = args[0].data_type();
-    match array_data_type {
+    match array.data_type() {
         List(_) => {
-            let array = as_list_array(&args[0])?;
+            let array = as_list_array(&array)?;
             general_pop_back_list::<i32>(array)
         }
         LargeList(_) => {
-            let array = as_large_list_array(&args[0])?;
+            let array = as_large_list_array(&array)?;
             general_pop_back_list::<i64>(array)
         }
         _ => exec_err!(
             "array_pop_back does not support type: {:?}",
-            array_data_type
+            array.data_type()
         ),
     }
 }
@@ -895,13 +914,13 @@ impl ScalarUDFImpl for ArrayAnyValue {
         }
     }
 
-    fn invoke_batch(
+    fn invoke_with_args(
         &self,
-        args: &[ColumnarValue],
-        _number_rows: usize,
+        args: datafusion_expr::ScalarFunctionArgs,
     ) -> Result<ColumnarValue> {
-        make_scalar_function(array_any_value_inner)(args)
+        make_scalar_function(array_any_value_inner)(&args.args)
     }
+
     fn aliases(&self) -> &[String] {
         &self.aliases
     }
@@ -912,17 +931,15 @@ impl ScalarUDFImpl for ArrayAnyValue {
 }
 
 fn array_any_value_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
-    if args.len() != 1 {
-        return exec_err!("array_any_value expects one argument");
-    }
+    let [array] = take_function_args("array_any_value", args)?;
 
-    match &args[0].data_type() {
+    match &array.data_type() {
         List(_) => {
-            let array = as_list_array(&args[0])?;
+            let array = as_list_array(&array)?;
             general_array_any_value::<i32>(array)
         }
         LargeList(_) => {
-            let array = as_large_list_array(&args[0])?;
+            let array = as_large_list_array(&array)?;
             general_array_any_value::<i64>(array)
         }
         data_type => exec_err!("array_any_value does not support type: {:?}", data_type),
@@ -982,10 +999,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::array_element_udf;
-    use arrow_schema::{DataType, Field};
-    use datafusion_common::{Column, DFSchema, ScalarValue};
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_common::{Column, DFSchema};
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{cast, Expr, ExprSchemable};
+    use datafusion_expr::{Expr, ExprSchemable};
     use std::collections::HashMap;
 
     // Regression test for https://github.com/apache/datafusion/issues/13755
@@ -1016,34 +1033,6 @@ mod tests {
         assert_eq!(
             udf.return_type(&[array_type.clone(), index_type.clone()])
                 .unwrap(),
-            fixed_size_list_type
-        );
-
-        // ScalarUDFImpl::return_type_from_exprs with typed exprs
-        assert_eq!(
-            udf.return_type_from_exprs(
-                &[
-                    cast(Expr::Literal(ScalarValue::Null), array_type.clone()),
-                    cast(Expr::Literal(ScalarValue::Null), index_type.clone()),
-                ],
-                &schema,
-                &[array_type.clone(), index_type.clone()]
-            )
-            .unwrap(),
-            fixed_size_list_type
-        );
-
-        // ScalarUDFImpl::return_type_from_exprs with exprs not carrying type
-        assert_eq!(
-            udf.return_type_from_exprs(
-                &[
-                    Expr::Column(Column::new_unqualified("my_array")),
-                    Expr::Column(Column::new_unqualified("my_index")),
-                ],
-                &schema,
-                &[array_type.clone(), index_type.clone()]
-            )
-            .unwrap(),
             fixed_size_list_type
         );
 

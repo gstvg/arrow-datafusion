@@ -27,17 +27,25 @@ license = { workspace = true }
 authors = { workspace = true }
 rust-version = { workspace = true }
 
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+backtrace = ["datafusion/backtrace"]
+
 [dependencies]
 arrow = { workspace = true }
 async-trait = { workspace = true }
-aws-config = "1.5.16"
+aws-config = "1.6.2"
 aws-credential-types = "1.2.0"
-clap = { version = "4.5.28", features = ["derive", "cargo"] }
+clap = { version = "4.5.37", features = ["derive", "cargo"] }
 datafusion = { workspace = true, features = [
     "avro",
     "crypto_expressions",
     "datetime_expressions",
     "encoding_expressions",
+    "nested_expressions",
     "parquet",
     "recursive_protection",
     "regex_expressions",
@@ -59,5 +67,7 @@ url = { workspace = true }
 [dev-dependencies]
 assert_cmd = "2.0"
 ctor = { workspace = true }
+insta = { workspace = true }
+insta-cmd = "0.6.0"
 predicates = "3.0"
 rstest = { workspace = true }

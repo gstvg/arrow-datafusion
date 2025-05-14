@@ -264,6 +264,7 @@ fn coerce_exprs_for_schema(
                     Expr::Alias(Alias { expr, name, .. }) => {
                         Ok(expr.cast_to(new_type, src_schema)?.alias(name))
                     }
+                    #[expect(deprecated)]
                     Expr::Wildcard { .. } => Ok(expr),
                     _ => expr.cast_to(new_type, src_schema),
                 }
@@ -297,6 +298,7 @@ pub struct NamePreserver {
 
 /// If the qualified name of an expression is remembered, it will be preserved
 /// when rewriting the expression
+#[derive(Debug)]
 pub enum SavedName {
     /// Saved qualified name to be preserved
     Saved {

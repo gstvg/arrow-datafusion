@@ -320,21 +320,8 @@ impl TryFrom<&protobuf::Field> for Field {
     type Error = Error;
     fn try_from(field: &protobuf::Field) -> Result<Self, Self::Error> {
         let datatype = field.arrow_type.as_deref().required("arrow_type")?;
-        let field = if field.dict_id != 0 {
-            // https://github.com/apache/datafusion/issues/14173
-            #[allow(deprecated)]
-            Self::new_dict(
-                field.name.as_str(),
-                datatype,
-                field.nullable,
-                field.dict_id,
-                field.dict_ordered,
-            )
-            .with_metadata(field.metadata.clone())
-        } else {
-            Self::new(field.name.as_str(), datatype, field.nullable)
-                .with_metadata(field.metadata.clone())
-        };
+        let field = Self::new(field.name.as_str(), datatype, field.nullable)
+            .with_metadata(field.metadata.clone());
         Ok(field)
     }
 }
@@ -436,36 +423,18 @@ impl TryFrom<&protobuf::ScalarValue> for ScalarValue {
 
                     let id = dict_batch.id();
 
-                    let fields_using_this_dictionary = {
-                        // See https://github.com/apache/datafusion/issues/14173
-                        #[allow(deprecated)]
-                        schema.fields_with_dict_id(id)
-                    };
+                    let record_batch = read_record_batch(
+                        &buffer,
+                        dict_batch.data().unwrap(),
+                        Arc::new(schema.clone()),
+                        &Default::default(),
+                        None,
+                        &message.version(),
+                    )?;
 
-                    let first_field = fields_using_this_dictionary.first().ok_or_else(|| {
-                        Error::General("dictionary id not found in schema while deserializing ScalarValue::List".to_string())
-                    })?;
+                    let values: ArrayRef = Arc::clone(record_batch.column(0));
 
-                    let values: ArrayRef = match first_field.data_type() {
-                        DataType::Dictionary(_, ref value_type) => {
-                            // Make a fake schema for the dictionary batch.
-                            let value = value_type.as_ref().clone();
-                            let schema = Schema::new(vec![Field::new("", value, true)]);
-                            // Read a single column
-                            let record_batch = read_record_batch(
-                                &buffer,
-                                dict_batch.data().unwrap(),
-                                Arc::new(schema),
-                                &Default::default(),
-                                None,
-                                &message.version(),
-                            )?;
-                            Ok(Arc::clone(record_batch.column(0)))
-                        }
-                        _ => Err(Error::General("dictionary id not found in schema while deserializing ScalarValue::List".to_string())),
-                    }?;
-
-                    Ok((id,values))
+                    Ok((id, values))
                 }).collect::<datafusion_common::Result<HashMap<_, _>>>()?;
 
                 let record_batch = read_record_batch(
@@ -983,6 +952,12 @@ impl TryFrom<&protobuf::ParquetOptions> for ParquetOptions {
                     protobuf::parquet_options::ColumnIndexTruncateLengthOpt::ColumnIndexTruncateLength(v) => Some(*v as usize),
                 })
                 .unwrap_or(None),
+            statistics_truncate_length: value
+                .statistics_truncate_length_opt.as_ref()
+                .map(|opt| match opt {
+                    protobuf::parquet_options::StatisticsTruncateLengthOpt::StatisticsTruncateLength(v) => Some(*v as usize),
+                })
+                .unwrap_or(None),
             data_page_row_count_limit: value.data_page_row_count_limit as usize,
             encoding: value
                 .encoding_opt.clone()
@@ -1009,6 +984,9 @@ impl TryFrom<&protobuf::ParquetOptions> for ParquetOptions {
             maximum_buffered_record_batches_per_stream: value.maximum_buffered_record_batches_per_stream as usize,
             schema_force_view_types: value.schema_force_view_types,
             binary_as_string: value.binary_as_string,
+            coerce_int96: value.coerce_int96_opt.clone().map(|opt| match opt {
+                protobuf::parquet_options::CoerceInt96Opt::CoerceInt96(v) => Some(v),
+            }).unwrap_or(None),
             skip_arrow_metadata: value.skip_arrow_metadata,
         })
     }

@@ -17,10 +17,10 @@
 
 //! Column
 
-use crate::error::_schema_err;
+use crate::error::{_schema_err, add_possible_columns_to_diag};
 use crate::utils::{parse_identifiers_normalized, quote_identifier};
 use crate::{DFSchema, Diagnostic, Result, SchemaError, Spans, TableReference};
-use arrow_schema::{Field, FieldRef};
+use arrow::datatypes::{Field, FieldRef};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
@@ -130,8 +130,8 @@ impl Column {
     /// where `"foo.BAR"` would be parsed to a reference to column named `foo.BAR`
     pub fn from_qualified_name(flat_name: impl Into<String>) -> Self {
         let flat_name = flat_name.into();
-        Self::from_idents(parse_identifiers_normalized(&flat_name, false)).unwrap_or(
-            Self {
+        Self::from_idents(parse_identifiers_normalized(&flat_name, false)).unwrap_or_else(
+            || Self {
                 relation: None,
                 name: flat_name,
                 spans: Spans::new(),
@@ -142,8 +142,8 @@ impl Column {
     /// Deserialize a fully qualified name string into a column preserving column text case
     pub fn from_qualified_name_ignore_case(flat_name: impl Into<String>) -> Self {
         let flat_name = flat_name.into();
-        Self::from_idents(parse_identifiers_normalized(&flat_name, true)).unwrap_or(
-            Self {
+        Self::from_idents(parse_identifiers_normalized(&flat_name, true)).unwrap_or_else(
+            || Self {
                 relation: None,
                 name: flat_name,
                 spans: Spans::new(),
@@ -273,18 +273,11 @@ impl Column {
                         // user which columns are candidates, or which table
                         // they come from. For now, let's list the table names
                         // only.
-                        for qualified_field in qualified_fields {
-                            let (Some(table), _) = qualified_field else {
-                                continue;
-                            };
-                            diagnostic.add_note(
-                                format!(
-                                    "possible reference to '{}' in table '{}'",
-                                    &self.name, table
-                                ),
-                                None,
-                            );
-                        }
+                        add_possible_columns_to_diag(
+                            &mut diagnostic,
+                            &Column::new_unqualified(&self.name),
+                            &columns,
+                        );
                         err.with_diagnostic(diagnostic)
                     });
                 }
@@ -380,8 +373,7 @@ impl fmt::Display for Column {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::DataType;
-    use arrow_schema::SchemaBuilder;
+    use arrow::datatypes::{DataType, SchemaBuilder};
     use std::sync::Arc;
 
     fn create_qualified_schema(qualifier: &str, names: Vec<&str>) -> Result<DFSchema> {

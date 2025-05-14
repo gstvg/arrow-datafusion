@@ -29,7 +29,7 @@ use std::{any::Any, fmt::Debug, sync::Arc};
 
 use crate::table_provider::FFI_TableProvider;
 use arrow::array::RecordBatch;
-use arrow_schema::Schema;
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use datafusion::{
     catalog::{Session, TableProvider},
@@ -238,7 +238,7 @@ struct AsyncTestRecordBatchStream {
 }
 
 impl RecordBatchStream for AsyncTestRecordBatchStream {
-    fn schema(&self) -> arrow_schema::SchemaRef {
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
         super::create_test_schema()
     }
 }
@@ -260,7 +260,7 @@ impl Stream for AsyncTestRecordBatchStream {
 
         if let Err(e) = this.batch_request.try_send(true) {
             return std::task::Poll::Ready(Some(Err(DataFusionError::Execution(
-                format!("Unable to send batch request, {}", e),
+                format!("Unable to send batch request, {e}"),
             ))));
         }
 
@@ -270,7 +270,7 @@ impl Stream for AsyncTestRecordBatchStream {
                 None => std::task::Poll::Ready(None),
             },
             Err(e) => std::task::Poll::Ready(Some(Err(DataFusionError::Execution(
-                format!("Unable receive record batch: {}", e),
+                format!("Unable to receive record batch: {e}"),
             )))),
         }
     }

@@ -29,7 +29,9 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
-use datafusion_expr::{ColumnarValue, Documentation, Expr, ScalarUDF, TypeSignature};
+use datafusion_expr::{
+    ColumnarValue, Documentation, Expr, ScalarFunctionArgs, ScalarUDF, TypeSignature,
+};
 use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
 use datafusion_macros::user_doc;
 
@@ -91,12 +93,8 @@ impl ScalarUDFImpl for PowerFunc {
         &self.aliases
     }
 
-    fn invoke_batch(
-        &self,
-        args: &[ColumnarValue],
-        _number_rows: usize,
-    ) -> Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(args)?;
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
 
         let arr: ArrayRef = match args[0].data_type() {
             DataType::Float64 => {
@@ -189,19 +187,32 @@ fn is_log(func: &ScalarUDF) -> bool {
 #[cfg(test)]
 mod tests {
     use arrow::array::Float64Array;
+    use arrow::datatypes::Field;
     use datafusion_common::cast::{as_float64_array, as_int64_array};
 
     use super::*;
 
     #[test]
     fn test_power_f64() {
-        let args = [
-            ColumnarValue::Array(Arc::new(Float64Array::from(vec![2.0, 2.0, 3.0, 5.0]))), // base
-            ColumnarValue::Array(Arc::new(Float64Array::from(vec![3.0, 2.0, 4.0, 4.0]))), // exponent
+        let arg_fields = vec![
+            Field::new("a", DataType::Float64, true),
+            Field::new("a", DataType::Float64, true),
         ];
-        #[allow(deprecated)] // TODO: migrate to invoke_with_args
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Float64Array::from(vec![
+                    2.0, 2.0, 3.0, 5.0,
+                ]))), // base
+                ColumnarValue::Array(Arc::new(Float64Array::from(vec![
+                    3.0, 2.0, 4.0, 4.0,
+                ]))), // exponent
+            ],
+            arg_fields: arg_fields.iter().collect(),
+            number_rows: 4,
+            return_field: &Field::new("f", DataType::Float64, true),
+        };
         let result = PowerFunc::new()
-            .invoke_batch(&args, 4)
+            .invoke_with_args(args)
             .expect("failed to initialize function power");
 
         match result {
@@ -222,13 +233,21 @@ mod tests {
 
     #[test]
     fn test_power_i64() {
-        let args = [
-            ColumnarValue::Array(Arc::new(Int64Array::from(vec![2, 2, 3, 5]))), // base
-            ColumnarValue::Array(Arc::new(Int64Array::from(vec![3, 2, 4, 4]))), // exponent
+        let arg_fields = vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("a", DataType::Int64, true),
         ];
-        #[allow(deprecated)] // TODO: migrate to invoke_with_args
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Int64Array::from(vec![2, 2, 3, 5]))), // base
+                ColumnarValue::Array(Arc::new(Int64Array::from(vec![3, 2, 4, 4]))), // exponent
+            ],
+            arg_fields: arg_fields.iter().collect(),
+            number_rows: 4,
+            return_field: &Field::new("f", DataType::Int64, true),
+        };
         let result = PowerFunc::new()
-            .invoke_batch(&args, 4)
+            .invoke_with_args(args)
             .expect("failed to initialize function power");
 
         match result {

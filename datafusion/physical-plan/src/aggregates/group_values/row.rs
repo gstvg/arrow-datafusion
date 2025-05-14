@@ -19,8 +19,8 @@ use crate::aggregates::group_values::GroupValues;
 use ahash::RandomState;
 use arrow::array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
 use arrow::compute::cast;
+use arrow::datatypes::{DataType, SchemaRef};
 use arrow::row::{RowConverter, Rows, SortField};
-use arrow_schema::{DataType, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::Result;
 use datafusion_execution::memory_pool::proxy::{HashTableAllocExt, VecAllocExt};
@@ -82,7 +82,7 @@ impl GroupValuesRows {
     pub fn try_new(schema: SchemaRef) -> Result<Self> {
         // Print a debugging message, so it is clear when the (slower) fallback
         // GroupValuesRows is used.
-        debug!("Creating GroupValuesRows for schema: {}", schema);
+        debug!("Creating GroupValuesRows for schema: {schema}");
         let row_converter = RowConverter::new(
             schema
                 .fields()
@@ -202,6 +202,7 @@ impl GroupValues for GroupValuesRows {
             EmitTo::All => {
                 let output = self.row_converter.convert_rows(&group_values)?;
                 group_values.clear();
+                self.map.clear();
                 output
             }
             EmitTo::First(n) => {
@@ -285,7 +286,7 @@ fn dictionary_encode_if_necessary(
             let list = array.as_any().downcast_ref::<ListArray>().unwrap();
 
             Ok(Arc::new(ListArray::try_new(
-                Arc::<arrow_schema::Field>::clone(expected_field),
+                Arc::<arrow::datatypes::Field>::clone(expected_field),
                 list.offsets().clone(),
                 dictionary_encode_if_necessary(
                     Arc::<dyn Array>::clone(list.values()),

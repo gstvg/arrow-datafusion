@@ -41,12 +41,15 @@ use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, Schema};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{internal_err, DFSchema, HashSet, Result, ScalarValue};
+use arrow::datatypes::{DataType, Field, Schema};
+use datafusion_common::{internal_err, Result, ScalarValue};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
     expr_vec_fmt, ColumnarValue, Expr, ReturnTypeArgs, ScalarFunctionArgMetadata,
     ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
+    expr_vec_fmt, ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF,
 };
 
 /// Physical expression of a scalar function
@@ -55,8 +58,7 @@ pub struct ScalarFunctionExpr {
     fun: Arc<ScalarUDF>,
     name: String,
     args: Vec<Arc<dyn PhysicalExpr>>,
-    return_type: DataType,
-    nullable: bool,
+    return_field: Field,
 }
 
 impl Debug for ScalarFunctionExpr {
@@ -65,7 +67,7 @@ impl Debug for ScalarFunctionExpr {
             .field("fun", &"<FUNC>")
             .field("name", &self.name)
             .field("args", &self.args)
-            .field("return_type", &self.return_type)
+            .field("return_field", &self.return_field)
             .finish()
     }
 }
@@ -76,14 +78,13 @@ impl ScalarFunctionExpr {
         name: &str,
         fun: Arc<ScalarUDF>,
         args: Vec<Arc<dyn PhysicalExpr>>,
-        return_type: DataType,
+        return_field: Field,
     ) -> Self {
         Self {
             fun,
             name: name.to_owned(),
             args,
-            return_type,
-            nullable: true,
+            return_field,
         }
     }
 
@@ -95,23 +96,22 @@ impl ScalarFunctionExpr {
     ) -> Result<Self> {
         let lambdas_schemas = lambdas_schemas_from_args(&fun, &args, schema)?;
 
-        let (arg_types, nullables): (Vec<_>, Vec<_>) =
-            std::iter::zip(&args, lambdas_schemas)
-                .map(|(e, schema)| {
-                    if let Some(lambda) = e.as_any().downcast_ref::<LambdaExpr>() {
-                        Ok((
-                            lambda.body().data_type(&schema)?,
-                            lambda.body().nullable(&schema)?,
-                        ))
-                    } else {
-                        Ok((e.data_type(&schema)?, e.nullable(&schema)?))
-                    }
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .unzip();
+        let arg_fields = std::iter::zip(&args, lambdas_schemas)
+            .map(|(e, schema)| {
+                if let Some(lambda) = e.as_any().downcast_ref::<LambdaExpr>() {
+                    lambda.body().return_field(schema)
+                } else {
+                    e.return_field(schema)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // verify that input data types is consistent with function's `TypeSignature`
+        let arg_types = arg_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect::<Vec<_>>();
+        
         data_types_with_scalar_udf(&arg_types, &fun)?;
 
         let arguments = args
@@ -128,22 +128,20 @@ impl ScalarFunctionExpr {
             .map(|e| e.as_any().is::<LambdaExpr>())
             .collect::<Vec<_>>();
 
-        let ret_args = ReturnTypeArgs {
-            arg_types: &arg_types,
+        let ret_args = ReturnFieldArgs {
+            arg_fields: &arg_fields,
             scalar_arguments: &arguments,
-            nullables: &nullables,
             lambdas: &lambdas,
         };
-        let (return_type, nullable) = fun.return_type_from_args(ret_args)?.into_parts();
 
+        let return_field = fun.return_field_from_args(ret_args)?;
         let name = fun.name().to_string();
-
+        
         Ok(Self {
             fun,
             name,
             args,
-            return_type,
-            nullable,
+            return_field,
         })
     }
 
@@ -164,16 +162,16 @@ impl ScalarFunctionExpr {
 
     /// Data type produced by this expression
     pub fn return_type(&self) -> &DataType {
-        &self.return_type
+        self.return_field.data_type()
     }
 
     pub fn with_nullable(mut self, nullable: bool) -> Self {
-        self.nullable = nullable;
+        self.return_field = self.return_field.with_nullable(nullable);
         self
     }
 
     pub fn nullable(&self) -> bool {
-        self.nullable
+        self.return_field.is_nullable()
     }
 }
 
@@ -190,11 +188,11 @@ impl PhysicalExpr for ScalarFunctionExpr {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(self.return_type.clone())
+        Ok(self.return_field.data_type().clone())
     }
 
     fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
-        Ok(self.nullable)
+        Ok(self.return_field.is_nullable())
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
@@ -206,6 +204,13 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 None => Ok(e.evaluate(batch)?),
             })
             .collect::<Result<Vec<_>>>()?;
+
+        let arg_fields_owned = self
+            .args
+            .iter()
+            .map(|e| e.return_field(batch.schema_ref()))
+            .collect::<Result<Vec<_>>>()?;
+        let arg_fields = arg_fields_owned.iter().collect::<Vec<_>>();
 
         let input_empty = args.is_empty();
         let input_all_scalar = args
@@ -269,8 +274,9 @@ impl PhysicalExpr for ScalarFunctionExpr {
         // evaluate the function
         let output = self.fun.invoke_with_args(ScalarFunctionArgs {
             args,
+            arg_fields,
             number_rows: batch.num_rows(),
-            return_type: &self.return_type,
+            return_field: &self.return_field,
             lambdas,
         })?;
 
@@ -291,6 +297,10 @@ impl PhysicalExpr for ScalarFunctionExpr {
         Ok(output)
     }
 
+    fn return_field(&self, _input_schema: &Schema) -> Result<Field> {
+        Ok(self.return_field.clone())
+    }
+
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
         self.args.iter().collect()
     }
@@ -299,15 +309,12 @@ impl PhysicalExpr for ScalarFunctionExpr {
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        Ok(Arc::new(
-            ScalarFunctionExpr::new(
-                &self.name,
-                Arc::clone(&self.fun),
-                children,
-                self.return_type().clone(),
-            )
-            .with_nullable(self.nullable),
-        ))
+        Ok(Arc::new(ScalarFunctionExpr::new(
+            &self.name,
+            Arc::clone(&self.fun),
+            children,
+            self.return_field.clone(),
+        )))
     }
 
     fn evaluate_bounds(&self, children: &[&Interval]) -> Result<Interval> {
@@ -336,6 +343,17 @@ impl PhysicalExpr for ScalarFunctionExpr {
             range,
             preserves_lex_ordering,
         })
+    }
+
+    fn fmt_sql(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}(", self.name)?;
+        for (i, expr) in self.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            expr.fmt_sql(f)?;
+        }
+        write!(f, ")")
     }
 }
 

@@ -22,8 +22,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use arrow_schema::{Fields, SchemaBuilder};
+use arrow::datatypes::{
+    DataType, Field, Fields, Schema, SchemaBuilder, SchemaRef, TimeUnit,
+};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{TransformedResult, TreeNode};
 use datafusion_common::{plan_err, DFSchema, Result, ScalarValue, TableReference};
@@ -115,7 +116,7 @@ fn concat_ws_literals() -> Result<()> {
 
 fn quick_test(sql: &str, expected_plan: &str) {
     let plan = test_sql(sql).unwrap();
-    assert_eq!(expected_plan, format!("{}", plan));
+    assert_eq!(expected_plan, format!("{plan}"));
 }
 
 fn test_sql(sql: &str) -> Result<LogicalPlan> {
@@ -341,8 +342,7 @@ where
         let expected = lit(ScalarValue::from(expected_value.clone()));
         assert_eq!(
             output, expected,
-            "{} simplified to {}, but expected {}",
-            expr, output, expected
+            "{expr} simplified to {output}, but expected {expected}"
         );
     }
 }
@@ -351,8 +351,7 @@ fn validate_unchanged_cases(rewriter: &mut GuaranteeRewriter, cases: &[Expr]) {
         let output = expr.clone().rewrite(rewriter).data().unwrap();
         assert_eq!(
             &output, expr,
-            "{} was simplified to {}, but expected it to be unchanged",
-            expr, output
+            "{expr} was simplified to {output}, but expected it to be unchanged"
         );
     }
 }

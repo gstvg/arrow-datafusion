@@ -148,8 +148,8 @@ mod tests {
     use crate::utils::tests::TestScalarUDF;
     use crate::{PhysicalExprRef, ScalarFunctionExpr};
 
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow_schema::{SortOptions, TimeUnit};
+    use arrow::compute::SortOptions;
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion_expr::{Operator, ScalarUDF};
 
     #[test]
@@ -636,11 +636,10 @@ mod tests {
             let orderings = projected_eq.oeq_class();
 
             let err_msg = format!(
-                "test_idx: {:?}, actual: {:?}, expected: {:?}, projection_mapping: {:?}",
-                idx, orderings, expected, projection_mapping
+                "test_idx: {idx:?}, actual: {orderings:?}, expected: {expected:?}, projection_mapping: {projection_mapping:?}"
             );
 
-            assert_eq!(orderings.len(), expected.len(), "{}", err_msg);
+            assert_eq!(orderings.len(), expected.len(), "{err_msg}");
             for expected_ordering in &expected {
                 assert!(orderings.contains(expected_ordering), "{}", err_msg)
             }
@@ -824,11 +823,10 @@ mod tests {
             let orderings = projected_eq.oeq_class();
 
             let err_msg = format!(
-                "test idx: {:?}, actual: {:?}, expected: {:?}, projection_mapping: {:?}",
-                idx, orderings, expected, projection_mapping
+                "test idx: {idx:?}, actual: {orderings:?}, expected: {expected:?}, projection_mapping: {projection_mapping:?}"
             );
 
-            assert_eq!(orderings.len(), expected.len(), "{}", err_msg);
+            assert_eq!(orderings.len(), expected.len(), "{err_msg}");
             for expected_ordering in &expected {
                 assert!(orderings.contains(expected_ordering), "{}", err_msg)
             }
@@ -970,11 +968,10 @@ mod tests {
             let orderings = projected_eq.oeq_class();
 
             let err_msg = format!(
-                "actual: {:?}, expected: {:?}, projection_mapping: {:?}",
-                orderings, expected, projection_mapping
+                "actual: {orderings:?}, expected: {expected:?}, projection_mapping: {projection_mapping:?}"
             );
 
-            assert_eq!(orderings.len(), expected.len(), "{}", err_msg);
+            assert_eq!(orderings.len(), expected.len(), "{err_msg}");
             for expected_ordering in &expected {
                 assert!(orderings.contains(expected_ordering), "{}", err_msg)
             }

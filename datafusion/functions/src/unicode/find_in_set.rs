@@ -25,7 +25,9 @@ use arrow::array::{
 use arrow::datatypes::{ArrowNativeType, DataType, Int32Type, Int64Type};
 
 use crate::utils::utf8_to_int_type;
-use datafusion_common::{exec_err, internal_err, Result, ScalarValue};
+use datafusion_common::{
+    exec_err, internal_err, utils::take_function_args, Result, ScalarValue,
+};
 use datafusion_expr::TypeSignature::Exact;
 use datafusion_expr::{
     ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
@@ -96,17 +98,9 @@ impl ScalarUDFImpl for FindInSetFunc {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let ScalarFunctionArgs { mut args, .. } = args;
+        let ScalarFunctionArgs { args, .. } = args;
 
-        if args.len() != 2 {
-            return exec_err!(
-                "find_in_set was called with {} arguments. It requires 2.",
-                args.len()
-            );
-        }
-
-        let str_list = args.pop().unwrap();
-        let string = args.pop().unwrap();
+        let [string, str_list] = take_function_args(self.name(), args)?;
 
         match (string, str_list) {
             // both inputs are scalars
@@ -354,7 +348,7 @@ mod tests {
     use crate::unicode::find_in_set::FindInSetFunc;
     use crate::utils::test::test_function;
     use arrow::array::{Array, Int32Array, StringArray};
-    use arrow::datatypes::DataType::Int32;
+    use arrow::datatypes::{DataType::Int32, Field};
     use datafusion_common::{Result, ScalarValue};
     use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl};
     use std::sync::Arc;
@@ -477,10 +471,17 @@ mod tests {
                     })
                     .unwrap_or(1);
                 let return_type = fis.return_type(&type_array)?;
+                let arg_fields_owned = args
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, a)| Field::new(format!("arg_{idx}"), a.data_type(), true))
+                    .collect::<Vec<_>>();
+                let arg_fields = arg_fields_owned.iter().collect::<Vec<_>>();
                 let result = fis.invoke_with_args(ScalarFunctionArgs {
                     args,
+                    arg_fields,
                     number_rows: cardinality,
-                    return_type: &return_type,
+                    return_field: &Field::new("f", return_type, true),
                     lambdas: vec![],
                 });
                 assert!(result.is_ok());
