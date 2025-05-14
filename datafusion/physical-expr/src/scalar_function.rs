@@ -34,7 +34,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::expressions::{new_expr_with_schema, Column, Lambda, Literal};
+use crate::expressions::{Column, LambdaExpr, Literal};
 use crate::PhysicalExpr;
 
 use arrow::array::{Array, RecordBatch};
@@ -46,7 +46,7 @@ use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
     expr_vec_fmt, ColumnarValue, Expr, ReturnTypeArgs, ScalarFunctionArgMetadata,
-    ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF, IS_LAMBDA_ARG,
+    ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
 };
 
 /// Physical expression of a scalar function
@@ -97,16 +97,14 @@ impl ScalarFunctionExpr {
 
         let (arg_types, nullables): (Vec<_>, Vec<_>) =
             std::iter::zip(&args, lambdas_schemas)
-                .map(|(e, lambda_schema)| {
-                    if let Some(lambda) = e.as_any().downcast_ref::<Lambda>() {
-                        let schema = lambda_schema.unwrap();
-
+                .map(|(e, schema)| {
+                    if let Some(lambda) = e.as_any().downcast_ref::<LambdaExpr>() {
                         Ok((
-                            lambda.inner().data_type(schema.as_arrow())?,
-                            lambda.inner().nullable(schema.as_arrow())?,
+                            lambda.body().data_type(&schema)?,
+                            lambda.body().nullable(&schema)?,
                         ))
                     } else {
-                        Ok((e.data_type(schema)?, e.nullable(schema)?))
+                        Ok((e.data_type(&schema)?, e.nullable(&schema)?))
                     }
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -127,7 +125,7 @@ impl ScalarFunctionExpr {
 
         let lambdas = args
             .iter()
-            .map(|e| e.as_any().is::<Lambda>())
+            .map(|e| e.as_any().is::<LambdaExpr>())
             .collect::<Vec<_>>();
 
         let ret_args = ReturnTypeArgs {
@@ -203,7 +201,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
         let args = self
             .args
             .iter()
-            .map(|e| match e.as_any().downcast_ref::<Lambda>() {
+            .map(|e| match e.as_any().downcast_ref::<LambdaExpr>() {
                 Some(_) => Ok(ColumnarValue::Scalar(ScalarValue::Null)),
                 None => Ok(e.evaluate(batch)?),
             })
@@ -214,62 +212,54 @@ impl PhysicalExpr for ScalarFunctionExpr {
             .iter()
             .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
 
-        let self_with_schema =
-            new_expr_with_schema(Arc::new(self.clone()), batch.schema())?;
+        let params = self.fun().inner().lambdas_parameters(&std::iter::zip(&self.args, &args)
+        .map(
+            |(expr, value)| match expr.as_any().downcast_ref::<LambdaExpr>() {
+                Some(lambda) => ScalarFunctionArgMetadata::Lambda(lambda.params()),
+                None => ScalarFunctionArgMetadata::Value(value.data_type()),
+            },
+        )
+        .collect::<Vec<_>>())?;
 
-        let lambdas = self_with_schema
-            .children
-            .iter()
-            .map(|a| {
-                a.expr
-                    .as_any()
-                    .downcast_ref::<Lambda>()
+        let lambdas = std::iter::zip(&self.args, params)
+            .map(|(arg, lambda_params)| {
+                arg.as_any()
+                    .downcast_ref::<LambdaExpr>()
                     .map(|lambda| {
-                        // let mut captured_indices = vec![false; batch.num_columns()];
+                        let mut indices = HashSet::new();
 
-                        // a.apply(|ctx| {
-                        //     if let Some(column) =
-                        //         ctx.expr.as_any().downcast_ref::<Column>()
-                        //     {
-                        //         let field = ctx.data.field_with_name(column.name())?;
+                        arg.apply_with_lambdas_params(|expr, lambdas_params| {
+                            if let Some(column) = expr.as_any().downcast_ref::<Column>() {
+                                if !lambdas_params.contains(column.name()) {
+                                    indices.insert(
+                                        batch.schema_ref().index_of(column.name())?,
+                                    );
+                                }
+                            }
 
-                        //         if !field.metadata().contains_key(IS_LAMBDA_ARG) {
-                        //             let index = batch.schema_ref().index_of(field.name())?;
+                            Ok(TreeNodeRecursion::Continue)
+                        })?;
 
-                        //             captured_indices[index] = true;
-                        //         }
-                        //     }
+                        let mut indices = indices.into_iter().collect::<Vec<_>>();
 
-                        //     Ok(TreeNodeRecursion::Continue)
-                        // })?;
+                        indices.sort_unstable();
 
-                        // let null_array = Arc::new(NullArray::new(batch.num_rows())) as ArrayRef;
+                        let fields =
+                            std::iter::zip(lambda.params(), lambda_params.unwrap())
+                                .map(|(name, param)| Arc::new(param.into_field(name)))
+                                .collect();
 
-                        // let (fields, arrays): (Vec<_>, _) = std::iter::zip(batch.schema_ref().fields(), captured_indices)
-                        //     .enumerate()
-                        //     .map(|(i, (field, captured))| if captured {
-                        //         (Arc::clone(field), Arc::clone(batch.column(i)))
-                        //     } else {
-                        //         (Arc::new(field.as_ref().clone().with_data_type(DataType::Null)), Arc::clone(&null_array))
-                        //     })
-                        //     .unzip();
-
-                        // let captures = RecordBatch::try_new_with_options(
-                        //     Arc::new(Schema::new(Fields::from(fields))),
-                        //     arrays,
-                        //     &RecordBatchOptions::new().with_match_field_names(true).with_row_count(Some(batch.num_rows()))
-                        // )?;
-
-                        let indices = a.data.fields()
-                            .iter()
-                            .filter(|field| !field.metadata().contains_key(IS_LAMBDA_ARG))
-                            .map(|field| batch.schema_ref().index_of(field.name()))
-                            .collect::<Result<Vec<_>, _>>()?;
+                        let captures = if indices.len() > 0 {
+                            Some(batch.project(&indices)?)
+                        } else {
+                            None
+                        };
 
                         Ok(ScalarFunctionLambdaArg {
-                            args_names: lambda.args(),
-                            body: lambda.inner().as_ref(),
-                            captures: batch.project(&indices)?,
+                            params: lambda.params(),
+                            fields,
+                            body: lambda.body().as_ref(),
+                            captures,
                         })
                     })
                     .transpose()
@@ -349,24 +339,29 @@ impl PhysicalExpr for ScalarFunctionExpr {
     }
 }
 
-pub fn lambdas_schemas_from_args(fun: &ScalarUDF, args: &[Arc<dyn PhysicalExpr>], schema: &Schema) -> Result<Vec<Option<DFSchema>>> {         
+pub fn lambdas_schemas_from_args(
+    fun: &ScalarUDF,
+    args: &[Arc<dyn PhysicalExpr>],
+    schema: &Schema,
+) -> Result<Vec<Schema>> {
     let args_metadata = args
         .iter()
-        .map(|e| match e.as_any().downcast_ref::<Lambda>() {
-            Some(lambda) => Ok(ScalarFunctionArgMetadata::Lambda(lambda.args())),
+        .map(|e| match e.as_any().downcast_ref::<LambdaExpr>() {
+            Some(lambda) => Ok(ScalarFunctionArgMetadata::Lambda(lambda.params())),
             None => Ok(ScalarFunctionArgMetadata::Value(e.data_type(schema)?)),
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let captures = args.iter()
-        .map(|arg| match arg.as_any().downcast_ref::<Lambda>() {
-            Some(lambda) => {
+    let captures = args
+        .iter()
+        .map(|arg| {
+            if arg.as_any().is::<LambdaExpr>() {
                 let mut columns = HashSet::new();
 
-                lambda.inner().apply(|n| {
+                arg.apply_with_lambdas_params(|n, lambdas_params| {
                     if let Some(column) = n.as_any().downcast_ref::<Column>() {
-                        if let Ok(index) = schema.index_of(column.name()) {
-                            columns.insert(index);
+                        if !lambdas_params.contains(column.name()) {
+                            columns.insert(schema.index_of(column.name())?);
                         }
                         // columns.insert(column.index());
                     }
@@ -375,16 +370,129 @@ pub fn lambdas_schemas_from_args(fun: &ScalarUDF, args: &[Arc<dyn PhysicalExpr>]
                 })?;
 
                 Ok(columns)
+            } else {
+                Ok(HashSet::new())
             }
-            None => Ok(HashSet::new()),
         })
         .collect::<Result<Vec<_>>>()?;
 
-    fun.lambdas_schemas(
-        &args_metadata,
-        &captures,
-        &DFSchema::try_from(schema.clone()).unwrap(),
-    )
+    Ok(fun
+        .lambdas_schemas(
+            &args_metadata,
+            &captures,
+            &DFSchema::try_from(schema.clone()).unwrap(),
+        )?
+        .into_iter()
+        .map(|dfschema| dfschema.into_owned().into())
+        .collect())
+}
+
+pub trait PhysicalExprExt {
+    fn apply_with_lambdas_params<
+        F: FnMut(&Self, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<TreeNodeRecursion>;
+
+    fn apply_with_schema<'n, F: FnMut(&'n Self, &Schema) -> Result<TreeNodeRecursion>>(
+        &'n self,
+        schema: &Schema,
+        f: F,
+    ) -> Result<TreeNodeRecursion>;
+
+    fn apply_children_with_schema<
+        'n,
+        F: FnMut(&'n Self, &Schema) -> Result<TreeNodeRecursion>,
+    >(
+        &'n self,
+        schema: &Schema,
+        f: F,
+    ) -> Result<TreeNodeRecursion>;
+}
+
+impl PhysicalExprExt for Arc<dyn PhysicalExpr> {
+    fn apply_with_lambdas_params<
+        F: FnMut(&Self, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+    >(
+        &self,
+        mut f: F,
+    ) -> Result<TreeNodeRecursion> {
+        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+        fn apply_with_lambdas_params_impl<
+            F: FnMut(&Arc<dyn PhysicalExpr>, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+        >(
+            node: &Arc<dyn PhysicalExpr>,
+            args: &HashSet<&str>,
+            f: &mut F,
+        ) -> Result<TreeNodeRecursion> {
+            match node.as_any().downcast_ref::<LambdaExpr>() {
+                Some(lambda) => {
+                    let mut args = args.clone();
+
+                    args.extend(lambda.params().iter().map(|v| v.as_str()));
+
+                    f(node, &args)?.visit_children(|| {
+                        node.apply_children(|c| {
+                            apply_with_lambdas_params_impl(c, &args, f)
+                        })
+                    })
+                }
+                _ => f(node, args)?.visit_children(|| {
+                    node.apply_children(|c| apply_with_lambdas_params_impl(c, args, f))
+                }),
+            }
+        }
+
+        apply_with_lambdas_params_impl(self, &HashSet::new(), &mut f)
+    }
+
+    fn apply_with_schema<'n, F: FnMut(&'n Self, &Schema) -> Result<TreeNodeRecursion>>(
+        &'n self,
+        schema: &Schema,
+        mut f: F,
+    ) -> Result<TreeNodeRecursion> {
+        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+        fn apply_with_lambdas_impl<
+            'n,
+            F: FnMut(&'n Arc<dyn PhysicalExpr>, &Schema) -> Result<TreeNodeRecursion>,
+        >(
+            node: &'n Arc<dyn PhysicalExpr>,
+            schema: &Schema,
+            f: &mut F,
+        ) -> Result<TreeNodeRecursion> {
+            f(node, schema)?.visit_children(|| {
+                node.apply_children_with_schema(schema, |c, schema| {
+                    apply_with_lambdas_impl(c, schema, f)
+                })
+            })
+        }
+
+        apply_with_lambdas_impl(self, schema, &mut f)
+    }
+
+    fn apply_children_with_schema<
+        'n,
+        F: FnMut(&'n Self, &Schema) -> Result<TreeNodeRecursion>,
+    >(
+        &'n self,
+        schema: &Schema,
+        mut f: F,
+    ) -> Result<TreeNodeRecursion> {
+        if let Some(scalar_function) = self.as_any().downcast_ref::<ScalarFunctionExpr>()
+        {
+            let mut lambdas_schemas = lambdas_schemas_from_args(
+                scalar_function.fun(),
+                scalar_function.args(),
+                schema,
+            )?
+            .into_iter();
+
+            self.apply_children(|expr| f(expr, &lambdas_schemas.next().unwrap()))
+        } else {
+            self.apply_children(|e| f(e, schema))
+        }
+    }
 }
 
 /// Create a physical expression for the UDF.

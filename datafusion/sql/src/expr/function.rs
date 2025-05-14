@@ -22,7 +22,7 @@ use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_datafusion_err, plan_err,
     DFSchema, Dependency, Result,
 };
-use datafusion_expr::expr::{ScalarFunction, Unnest};
+use datafusion_expr::expr::{Lambda, ScalarFunction, Unnest};
 use datafusion_expr::planner::PlannerResult;
 use datafusion_expr::{
     expr, qualified_wildcard, wildcard, Expr, ExprFunctionExt, ExprSchemable,
@@ -419,12 +419,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 arg: FunctionArgExpr::Wildcard,
                 operator: _,
             } => Ok(wildcard()),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Lambda(sqlparser::ast::LambdaFunction { params, body }))) => {
-                let arg_names = params.into_iter().map(|v| v.to_string()).collect::<Vec<_>>();
-                Ok(Expr::Lambda {
-                    arg_names: arg_names.clone(),
-                    expr: Box::new(self.sql_expr_to_logical_expr(*body, schema, &mut planner_context.clone().with_lambda_arguments(arg_names))?),
-                })
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Lambda(
+                sqlparser::ast::LambdaFunction { params, body },
+            ))) => {
+                let params = params
+                    .into_iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>();
+
+                Ok(Expr::Lambda(Lambda {
+                    params: params.clone(),
+                    body: Box::new(self.sql_expr_to_logical_expr(
+                        *body,
+                        schema,
+                        &mut planner_context.clone().with_lambda_parameters(params),
+                    )?),
+                }))
             }
             FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => {
                 self.sql_expr_to_logical_expr(arg, schema, planner_context)

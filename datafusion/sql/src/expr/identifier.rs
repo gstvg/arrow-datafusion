@@ -53,7 +53,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             let normalize_ident = self.ident_normalizer.normalize(id);
 
             if planner_context
-                .lambdas_arguments()
+                .lambdas_parameters()
                 .contains(&normalize_ident)
             {
                 let mut column = Column::new_unqualified(normalize_ident);

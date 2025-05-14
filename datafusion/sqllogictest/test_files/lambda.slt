@@ -23,6 +23,12 @@ statement ok
 set datafusion.sql_parser.dialect = databricks;
 
 statement ok
+CREATE TABLE tt
+AS VALUES
+([1, 50], 10),
+([4, 50], 40);
+
+statement ok
 CREATE TABLE t AS SELECT 1 as f, [ [ [2, 3], [2] ], [ [1] ], [ [] ] ] as v, 1 as n;
 
 query I?
@@ -128,3 +134,13 @@ query ?
 SELECT list_map([1,2,3,4,5], v -> v*2);
 ----
 [2, 4, 6, 8, 10]
+
+
+query error DataFusion error: Execution error: list_map expects a value follewed by a lambda, got \[\]
+select list_map();
+
+query error DataFusion error: Execution error: expected list, got Int64
+select list_map(1, v -> v*2);
+
+query error DataFusion error: Execution error: list_map expects a value follewed by a lambda, got \[Lambda\(\["v"\]\), Value\(List\(Field \{ name: "item", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: \{\} \}\)\)\]
+select list_map(v -> v*2, [1, 2]);

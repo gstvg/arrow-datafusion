@@ -162,7 +162,7 @@ pub fn is_restrict_null_predicate<'a>(
 
 fn coerce(expr: Expr, schema: &DFSchema) -> Result<Expr> {
     let mut expr_rewrite = TypeCoercionRewriter { schema };
-    expr.rewrite_with_lambdas(schema, &mut expr_rewrite).data()
+    expr.rewrite_with_schema(schema, &mut expr_rewrite).data()
 }
 
 #[cfg(test)]

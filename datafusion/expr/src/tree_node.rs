@@ -17,9 +17,12 @@
 
 //! Tree node implementation for Logical Expressions
 
+use std::collections::HashSet;
+
 use crate::expr::{
     AggregateFunction, Alias, Between, BinaryExpr, Case, Cast, GroupingSet, InList,
-    InSubquery, Like, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction,
+    InSubquery, Lambda, Like, Placeholder, ScalarFunction, TryCast, Unnest,
+    WindowFunction,
 };
 use crate::{Expr, ExprFunctionExt};
 use datafusion_common::tree_node::{
@@ -100,8 +103,7 @@ impl TreeNode for Expr {
             Expr::InList(InList { expr, list, .. }) => {
                 (expr, list).apply_ref_elements(f)
             }
-            // TODO: apply lambda expr somehow
-            Expr::Lambda { expr, .. } => expr.apply_elements(f)
+            Expr::Lambda (Lambda{ params: _, body}) => body.apply_elements(f)
         }
     }
 
@@ -283,10 +285,9 @@ impl TreeNode for Expr {
                 .update_data(|(new_expr, new_list)| {
                     Expr::InList(InList::new(new_expr, new_list, negated))
                 }),
-            // TODO: transform lambda expr somehow
-            Expr::Lambda { arg_names, expr } => expr
+            Expr::Lambda(Lambda { params, body }) => body
                 .map_elements(f)?
-                .update_data(|expr| Expr::Lambda { arg_names, expr }),
+                .update_data(|body| Expr::Lambda(Lambda { params, body })),
         })
     }
 }
@@ -295,7 +296,7 @@ impl Expr {
     /// Visits a expr similarly to [`Self::visit`], including lambdas that
     /// may appear in expressions such as `list_map([1, 2], v -> v*2)`.
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-    pub fn visit_with_lambdas<
+    pub fn visit_with_schema<
         'n,
         // V: for<'a> TreeNodeVisitor<'a, Node = (&'n Self, &'a Schema)>,
         V: for<'a> TreeNodeVisitor<'a, Node = (&'a Self, &'a DFSchema)>,
@@ -306,35 +307,25 @@ impl Expr {
     ) -> Result<TreeNodeRecursion> {
         match self {
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                let mut lambdas_schemas = func
-                    .lambdas_schemas_from_args(args, schema)?
-                    .into_iter()
-                    .flatten();
+                let mut lambdas_schemas =
+                    func.lambdas_schemas_from_args(args, schema)?.into_iter();
 
                 visitor
                     .f_down(&(self, schema))?
                     .visit_children(|| {
                         self.apply_children(|c| {
-                            if matches!(c, Expr::Lambda { .. }) {
-                                c.visit_with_lambdas(
-                                    &lambdas_schemas.next().unwrap(),
-                                    visitor,
-                                )
-                            } else {
-                                c.visit_with_lambdas(schema, visitor)
-                            }
+                            c.visit_with_schema(
+                                &lambdas_schemas.next().unwrap(),
+                                visitor,
+                            )
                         })
                     })?
                     .visit_parent(|| visitor.f_up(&(self, schema)))
             }
-            Expr::Lambda { arg_names: _, expr } => visitor
-                .f_down(&(self, schema))?
-                .visit_children(|| expr.visit_with_lambdas(schema, visitor))?
-                .visit_parent(|| visitor.f_up(&(self, schema))),
             _ => visitor
                 .f_down(&(self, schema))?
                 .visit_children(|| {
-                    self.apply_children(|c| c.visit_with_lambdas(schema, visitor))
+                    self.apply_children(|c| c.visit_with_schema(schema, visitor))
                 })?
                 .visit_parent(|| visitor.f_up(&(self, schema))),
         }
@@ -343,7 +334,7 @@ impl Expr {
     /// Similarly to [`Self::rewrite`], rewrites this expr and its inputs using `f`,
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
     #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-    pub fn rewrite_with_lambdas<R: ExprWithLambdasRewriter>(
+    pub fn rewrite_with_schema<R: ExprWithLambdasRewriter>(
         self,
         schema: &DFSchema,
         rewriter: &mut R,
@@ -352,36 +343,21 @@ impl Expr {
             .f_down(self, schema)?
             .transform_children(|n| match n {
                 Expr::ScalarFunction(ScalarFunction { ref func, ref args }) => {
-                    let mut lambdas_schemas = func
-                        .lambdas_schemas_from_args(args, schema)?
-                        .into_iter()
-                        .flatten();
+                    let mut lambdas_schemas =
+                        func.lambdas_schemas_from_args(args, schema)?.into_iter();
 
                     n.map_children(|n| {
-                        if matches!(n, Expr::Lambda { .. }) {
-                            n.rewrite_with_lambdas(
-                                &lambdas_schemas.next().unwrap(),
-                                rewriter,
-                            )
-                        } else {
-                            n.rewrite_with_lambdas(schema, rewriter)
-                        }
+                        n.rewrite_with_schema(&lambdas_schemas.next().unwrap(), rewriter)
                     })
                 }
-                Expr::Lambda { arg_names, expr } => Ok(expr
-                    .rewrite_with_lambdas(schema, rewriter)?
-                    .update_data(|body| Expr::Lambda {
-                        arg_names,
-                        expr: Box::new(body),
-                    })),
-                _ => n.map_children(|n| n.rewrite_with_lambdas(schema, rewriter)),
+                _ => n.map_children(|n| n.rewrite_with_schema(schema, rewriter)),
             })?
             .transform_parent(|n| rewriter.f_up(n, schema))
     }
 
     /// Similarly to [`Self::apply`], calls `f` on this expr and all its inputs,
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn apply_with_lambdas<
+    pub fn apply_with_schema<
         'n,
         F: FnMut(&'n Self, &DFSchema) -> Result<TreeNodeRecursion>,
     >(
@@ -390,7 +366,7 @@ impl Expr {
         mut f: F,
     ) -> Result<TreeNodeRecursion> {
         #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn apply_with_lambdas_impl<
+        fn apply_with_schema_impl<
             'n,
             F: FnMut(&'n Expr, &DFSchema) -> Result<TreeNodeRecursion>,
         >(
@@ -399,30 +375,30 @@ impl Expr {
             f: &mut F,
         ) -> Result<TreeNodeRecursion> {
             f(node, schema)?.visit_children(|| {
-                node.apply_lambdas(schema, |c, schema| {
-                    apply_with_lambdas_impl(c, schema, f)
+                node.apply_children_with_schema(schema, |c, schema| {
+                    apply_with_schema_impl(c, schema, f)
                 })
             })
         }
 
-        apply_with_lambdas_impl(self, schema, &mut f)
+        apply_with_schema_impl(self, schema, &mut f)
     }
 
     /// Similarly to [`Self::transform`], rewrites this expr and its inputs using `f`,
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn transform_with_lambdas<
+    pub fn transform_with_schema<
         F: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>,
     >(
         self,
         schema: &DFSchema,
         f: F,
     ) -> Result<Transformed<Self>> {
-        self.transform_up_with_lambdas(schema, f)
+        self.transform_up_with_schema(schema, f)
     }
 
     /// Similarly to [`Self::transform_down`], rewrites this expr and its inputs using `f`,
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn transform_down_with_lambdas<
+    pub fn transform_down_with_schema<
         F: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>,
     >(
         self,
@@ -430,7 +406,7 @@ impl Expr {
         mut f: F,
     ) -> Result<Transformed<Self>> {
         #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_down_with_lambdas_impl<
+        fn transform_down_with_schema_impl<
             F: FnMut(Expr, &DFSchema) -> Result<Transformed<Expr>>,
         >(
             node: Expr,
@@ -438,18 +414,18 @@ impl Expr {
             f: &mut F,
         ) -> Result<Transformed<Expr>> {
             f(node, schema)?.transform_children(|n| {
-                n.map_lambdas(schema, |n, schema| {
-                    transform_down_with_lambdas_impl(n, schema, f)
+                n.map_children_with_schema(schema, |n, schema| {
+                    transform_down_with_schema_impl(n, schema, f)
                 })
             })
         }
 
-        transform_down_with_lambdas_impl(self, schema, &mut f)
+        transform_down_with_schema_impl(self, schema, &mut f)
     }
 
     /// Similarly to [`Self::transform_up`], rewrites this expr and its inputs using `f`,
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn transform_up_with_lambdas<
+    pub fn transform_up_with_schema<
         F: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>,
     >(
         self,
@@ -457,25 +433,25 @@ impl Expr {
         mut f: F,
     ) -> Result<Transformed<Self>> {
         #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_up_with_lambdas_impl<
+        fn transform_up_with_schema_impl<
             F: FnMut(Expr, &DFSchema) -> Result<Transformed<Expr>>,
         >(
             node: Expr,
             schema: &DFSchema,
             f: &mut F,
         ) -> Result<Transformed<Expr>> {
-            node.map_lambdas(schema, |n, schema| {
-                transform_up_with_lambdas_impl(n, schema, f)
+            node.map_children_with_schema(schema, |n, schema| {
+                transform_up_with_schema_impl(n, schema, f)
             })?
             .transform_parent(|n| f(n, schema))
         }
 
-        transform_up_with_lambdas_impl(self, schema, &mut f)
+        transform_up_with_schema_impl(self, schema, &mut f)
     }
 
     /// Similarly to [`Self::transform_down`], rewrites this expr and its inputs using `f`,
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn transform_down_up_with_lambdas<
+    pub fn transform_down_up_with_schema<
         FD: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>,
         FU: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>,
     >(
@@ -485,7 +461,7 @@ impl Expr {
         mut f_up: FU,
     ) -> Result<Transformed<Self>> {
         #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
-        fn transform_down_up_with_lambdas_impl<
+        fn transform_down_up_with_schema_impl<
             FD: FnMut(Expr, &DFSchema) -> Result<Transformed<Expr>>,
             FU: FnMut(Expr, &DFSchema) -> Result<Transformed<Expr>>,
         >(
@@ -496,19 +472,19 @@ impl Expr {
         ) -> Result<Transformed<Expr>> {
             f_down(node, schema)?
                 .transform_children(|n| {
-                    n.map_lambdas(schema, |n, schema| {
-                        transform_down_up_with_lambdas_impl(n, schema, f_down, f_up)
+                    n.map_children_with_schema(schema, |n, schema| {
+                        transform_down_up_with_schema_impl(n, schema, f_down, f_up)
                     })
                 })?
                 .transform_parent(|n| f_up(n, schema))
         }
 
-        transform_down_up_with_lambdas_impl(self, schema, &mut f_down, &mut f_up)
+        transform_down_up_with_schema_impl(self, schema, &mut f_down, &mut f_up)
     }
 
     /// Similarly to [`Self::apply`], calls `f` on this expr and its inputs
     /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
-    pub fn apply_lambdas<
+    pub fn apply_children_with_schema<
         'n,
         F: FnMut(&'n Self, &DFSchema) -> Result<TreeNodeRecursion>,
     >(
@@ -518,69 +494,67 @@ impl Expr {
     ) -> Result<TreeNodeRecursion> {
         match self {
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                let mut lambdas_schemas = func
-                    .lambdas_schemas_from_args(args, schema)?
-                    .into_iter()
-                    .flatten();
+                let mut lambdas_schemas =
+                    func.lambdas_schemas_from_args(args, schema)?.into_iter();
 
-                self.apply_children(|expr| {
-                    if matches!(expr, Expr::Lambda { .. }) {
-                        f(expr, &lambdas_schemas.next().unwrap())
-                    } else {
-                        f(expr, schema)
-                    }
-                })
+                self.apply_children(|expr| f(expr, &lambdas_schemas.next().unwrap()))
             }
-            Expr::Lambda {
-                arg_names: _,
-                expr: body,
-            } => f(body, schema),
             _ => self.apply_children(|e| f(e, schema)),
         }
     }
 
-    /// Similarly to [`Self::map_children`], rewrites all lambdas that may
-    /// appear in expressions such as `list_map([1, 2], v -> v*2)`.
+    /// Similarly to [`Self::map_children`], apply `f` to rewrite the node's children (but not the node itself),
+    /// including the scoped schema of the children, which differ in case it's a lambda, like in `list_map([1, 2], v -> v*2)`.
     ///
     /// Returns the current node.
-    pub fn map_lambdas<F: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>>(
+    pub fn map_children_with_schema<F: FnMut(Self, &DFSchema) -> Result<Transformed<Self>>>(
         self,
         schema: &DFSchema,
         mut f: F,
     ) -> Result<Transformed<Self>> {
         match self {
             Expr::ScalarFunction(ScalarFunction { ref func, ref args }) => {
-                let mut lambdas_schemas = func
-                    .lambdas_schemas_from_args(args, schema)?
-                    .into_iter()
-                    .flatten();
+                let mut lambdas_schemas =
+                    func.lambdas_schemas_from_args(args, schema)?.into_iter();
 
-                self.map_children(|expr| {
-                    if matches!(expr, Expr::Lambda { .. }) {
-                        f(expr, &lambdas_schemas.next().unwrap())
-                    } else {
-                        f(expr, schema)
-                    }
-                })
-            }
-            Expr::Lambda { arg_names, expr } => {
-                Ok(f(*expr, schema)?.update_data(|body| Expr::Lambda {
-                    arg_names,
-                    expr: Box::new(body),
-                }))
+                self.map_children(|expr| f(expr, &lambdas_schemas.next().unwrap()))
             }
             _ => self.map_children(|expr| f(expr, schema)),
         }
     }
+    
+    /// Similarly to [`Self::map_children`], rewrites all lambdas that may
+    /// appear in expressions such as `list_map([1, 2], v -> v*2)`.
+    ///
+    /// Returns the current node.
+    pub fn map_children_with_lambdas_params<F: FnMut(Self, &HashSet<String>) -> Result<Transformed<Self>>>(
+        self,
+        args: &HashSet<String>,
+        mut f: F,
+    ) -> Result<Transformed<Self>> {
+        match &self {
+            Expr::Lambda(Lambda {
+                params,
+                body: _,
+            }) => {
+                let mut args = args.clone();
 
-    pub fn exists_with_lambdas<F: FnMut(&Self, &DFSchema) -> Result<bool>>(
+                args.extend(params.iter().cloned());
+
+                self.map_children(|expr| f(expr, &args))
+            }
+            _ => self.map_children(|expr| f(expr, args)),
+        }
+    }
+
+    pub fn exists_with_schema<F: FnMut(&Self, &DFSchema) -> Result<bool>>(
         &self,
         schema: &DFSchema,
         mut f: F,
     ) -> Result<bool> {
         let mut found = false;
 
-        self.apply_lambdas(schema, |n, schema| {
+        self.apply_children_with_schema(schema, |n, schema| {
             if f(n, schema)? {
                 found = true;
                 Ok(TreeNodeRecursion::Stop)
@@ -590,6 +564,83 @@ impl Expr {
         })?;
 
         Ok(found)
+    }
+
+    /// Similarly to [`Self::transform_up`], rewrites this expr and its inputs using `f`,
+    /// including lambdas that may appear in expressions such as `list_map([1, 2], v -> v*2)`.
+    pub fn transform_up_with_lambdas_params<
+        F: FnMut(Self, &HashSet<String>) -> Result<Transformed<Self>>,
+    >(
+        self,
+        mut f: F,
+    ) -> Result<Transformed<Self>> {
+        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+        fn transform_up_with_lambdas_params_impl<
+            F: FnMut(Expr, &HashSet<String>) -> Result<Transformed<Expr>>,
+        >(
+            node: Expr,
+            args: &HashSet<String>,
+            f: &mut F,
+        ) -> Result<Transformed<Expr>> {
+            match &node {
+                Expr::Lambda(Lambda {
+                    params,
+                    body: _,
+                }) => {
+                    let mut args = args.clone();
+
+                    args.extend(params.iter().cloned());
+
+                    node.map_children(|n| {
+                        transform_up_with_lambdas_params_impl(n, &args, f)
+                    })?
+                    .transform_parent(|n| f(n, &args))
+                }
+                _ => node
+                    .map_children(|n| transform_up_with_lambdas_params_impl(n, args, f))?
+                    .transform_parent(|n| f(n, args)),
+            }
+        }
+
+        transform_up_with_lambdas_params_impl(self, &HashSet::new(), &mut f)
+    }
+
+    pub fn apply_with_lambdas_params<
+        'n,
+        F: FnMut(&'n Self, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+    >(
+        &'n self,
+        mut f: F,
+    ) -> Result<TreeNodeRecursion> {
+        #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
+        fn apply_with_lambdas_params_impl<
+            'n,
+            F: FnMut(&'n Expr, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+        >(
+            node: &'n Expr,
+            args: &HashSet<&str>,
+            f: &mut F,
+        ) -> Result<TreeNodeRecursion> {
+            match node {
+                Expr::Lambda(Lambda {
+                    params,
+                    body: _,
+                }) => {
+                    let mut args = args.clone();
+
+                    args.extend(params.iter().map(|v| v.as_str()));
+
+                    f(node, &args)?.visit_children(|| {
+                        node.apply_children(|c| apply_with_lambdas_params_impl(c, &args, f))
+                    })
+                }
+                _ => f(node, args)?.visit_children(|| {
+                    node.apply_children(|c| apply_with_lambdas_params_impl(c, args, f))
+                }),
+            }
+        }
+
+        apply_with_lambdas_params_impl(self, &HashSet::new(), &mut f)
     }
 }
 
@@ -618,7 +669,8 @@ mod tests {
     };
 
     use crate::{
-        col, Expr, LambdaArgument, ScalarFunctionArgMetadata, ScalarUDF, ScalarUDFImpl,
+        col, expr::Lambda, Expr, LambdaParameter, ScalarFunctionArgMetadata, ScalarUDF,
+        ScalarUDFImpl,
     };
 
     use super::ExprWithLambdasRewriter;
@@ -636,16 +688,16 @@ mod tests {
     fn list_map() -> Expr {
         ScalarUDF::new_from_impl(ListMapFunc).call(vec![
             col("v"),
-            Expr::Lambda {
-                arg_names: vec!["v".into()],
-                expr: Box::new(ScalarUDF::new_from_impl(ListMapFunc).call(vec![
+            Expr::Lambda(Lambda {
+                params: vec!["v".into()],
+                body: Box::new(ScalarUDF::new_from_impl(ListMapFunc).call(vec![
                     col("v"),
-                    Expr::Lambda {
-                        arg_names: vec!["v".into()],
-                        expr: Box::new(-col("v")),
-                    },
+                    Expr::Lambda(Lambda {
+                        params: vec!["v".into()],
+                        body: Box::new(-col("v")),
+                    }),
                 ])),
-            },
+            }),
         ])
     }
 
@@ -761,17 +813,17 @@ mod tests {
             Ok(arg_types[0].clone())
         }
 
-        fn lambdas_arguments(
+        fn lambdas_parameters(
             &self,
             args: &[ScalarFunctionArgMetadata],
-        ) -> Result<Vec<Option<Vec<LambdaArgument>>>> {
+        ) -> Result<Vec<Option<Vec<LambdaParameter>>>> {
             let ScalarFunctionArgMetadata::Value(DataType::List(field)) = &args[0] else {
                 unimplemented!()
             };
 
             Ok(vec![
                 None,
-                Some(vec![LambdaArgument::new(
+                Some(vec![LambdaParameter::new(
                     field.data_type().clone(),
                     field.is_nullable(),
                 )]),
@@ -780,13 +832,13 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_with_lambdas2() {
+    fn test_apply_with_schema2() {
         let list_map = list_map();
         let mut strings = vec![];
         let mut count = 0;
 
         list_map
-            .apply_with_lambdas(&schema(), |expr, _schema| {
+            .apply_with_schema(&schema(), |expr, _schema| {
                 strings.push(format!("apply {expr}"));
 
                 count += 1;
@@ -803,13 +855,13 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_with_lambdas() {
+    fn test_apply_with_schema() {
         let schema = schema();
         let list_map = list_map();
         let mut strings = vec![];
 
         list_map
-            .apply_with_lambdas(&schema, |expr, schema| {
+            .apply_with_schema(&schema, |expr, schema| {
                 strings.push(format!("apply {} {}", expr, short_fields(schema.fields())));
 
                 Ok(TreeNodeRecursion::Continue)
@@ -827,13 +879,13 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_up_with_lambdas() {
+    fn test_transform_up_with_schema() {
         let schema = schema();
         let list_map = list_map();
         let mut strings = vec![];
 
         list_map
-            .transform_up_with_lambdas(&schema, |expr, schema| {
+            .transform_up_with_schema(&schema, |expr, schema| {
                 strings.push(format!(
                     "transform_up {} {}",
                     expr,
@@ -860,13 +912,13 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_down_with_lambdas() {
+    fn test_transform_down_with_schema() {
         let schema = schema();
         let list_map = list_map();
         let mut strings = vec![];
 
         list_map
-            .transform_down_with_lambdas(&schema, |expr, schema| {
+            .transform_down_with_schema(&schema, |expr, schema| {
                 strings.push(format!(
                     "transform_down {} {}",
                     expr,
@@ -884,13 +936,13 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_down_up_with_lambdas() {
+    fn test_transform_down_up_with_schema() {
         let schema = schema();
         let list_map = list_map();
         let strings = RefCell::new(vec![]);
 
         list_map
-            .transform_down_up_with_lambdas(
+            .transform_down_up_with_schema(
                 &schema,
                 |expr, schema| {
                     strings.borrow_mut().push(format!(
@@ -920,13 +972,13 @@ mod tests {
     }
 
     #[test]
-    fn test_exists_with_lambdas() {
+    fn test_exists_with_schema() {
         let schema = schema();
         let list_map = list_map();
         let mut strings = vec![];
 
         list_map
-            .exists_with_lambdas(&schema, |expr, schema| {
+            .exists_with_schema(&schema, |expr, schema| {
                 strings.push(format!(
                     "exists {} {}",
                     expr,
@@ -944,12 +996,12 @@ mod tests {
     }
 
     #[test]
-    fn test_visit_with_lambdas() {
+    fn test_visit_with_schema() {
         let schema = schema();
         let list_map = list_map();
         let mut visitor = OkVisitor::default();
 
-        list_map.visit_with_lambdas(&schema, &mut visitor).unwrap();
+        list_map.visit_with_schema(&schema, &mut visitor).unwrap();
 
         assert_eq!(
             visitor.strings,
@@ -959,14 +1011,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_with_lambdas() {
+    fn test_rewrite_with_schema() {
         let schema = schema();
         let list_map = list_map();
 
         let mut rewriter = OkVisitor::default();
 
         list_map
-            .rewrite_with_lambdas(&schema, &mut rewriter)
+            .rewrite_with_schema(&schema, &mut rewriter)
             .unwrap();
 
         assert_eq!(

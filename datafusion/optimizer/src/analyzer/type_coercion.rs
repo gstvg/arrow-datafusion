@@ -141,7 +141,7 @@ fn analyze_internal(
     // apply coercion rewrite all expressions in the plan individually
     plan.map_expressions(|expr| {
         let original_name = name_preserver.save(&expr);
-        expr.rewrite_with_lambdas(&schema, &mut expr_rewrite)
+        expr.rewrite_with_schema(&schema, &mut expr_rewrite)
             .map(|transformed| transformed.update_data(|e| original_name.restore(e)))
     })?
     // some plans need extra coercion after their expressions are coerced
@@ -1670,7 +1670,7 @@ mod test {
         let mut rewriter = TypeCoercionRewriter { schema: &schema };
         let expr = is_true(lit(12i32).gt(lit(13i64)));
         let expected = is_true(cast(lit(12i32), DataType::Int64).gt(lit(13i64)));
-        let result = expr.rewrite_with_lambdas(&schema, &mut rewriter).data()?;
+        let result = expr.rewrite_with_schema(&schema, &mut rewriter).data()?;
         assert_eq!(expected, result);
 
         // eq
@@ -1681,7 +1681,7 @@ mod test {
         let mut rewriter = TypeCoercionRewriter { schema: &schema };
         let expr = is_true(lit(12i32).eq(lit(13i64)));
         let expected = is_true(cast(lit(12i32), DataType::Int64).eq(lit(13i64)));
-        let result = expr.rewrite_with_lambdas(&schema, &mut rewriter).data()?;
+        let result = expr.rewrite_with_schema(&schema, &mut rewriter).data()?;
         assert_eq!(expected, result);
 
         // lt
@@ -1692,7 +1692,7 @@ mod test {
         let mut rewriter = TypeCoercionRewriter { schema: &schema };
         let expr = is_true(lit(12i32).lt(lit(13i64)));
         let expected = is_true(cast(lit(12i32), DataType::Int64).lt(lit(13i64)));
-        let result = expr.rewrite_with_lambdas(&schema, &mut rewriter).data()?;
+        let result = expr.rewrite_with_schema(&schema, &mut rewriter).data()?;
         assert_eq!(expected, result);
 
         Ok(())

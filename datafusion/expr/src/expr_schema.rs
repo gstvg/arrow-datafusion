@@ -17,8 +17,7 @@
 
 use super::{Between, Expr, Like};
 use crate::expr::{
-    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Placeholder,
-    ScalarFunction, TryCast, Unnest, WindowFunction,
+    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Lambda, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction
 };
 use crate::type_coercion::functions::{
     data_types_with_aggregate_udf, data_types_with_scalar_udf, data_types_with_window_udf,
@@ -27,10 +26,9 @@ use crate::udf::ReturnTypeArgs;
 use crate::{utils, LogicalPlan, Projection, Subquery, WindowFunctionDefinition};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
     not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError,
-    ExprSchema, HashSet, Result, TableReference,
+    ExprSchema, Result, TableReference,
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
@@ -406,55 +404,36 @@ impl ExprSchemable for Expr {
                 self.data_type_and_nullable_with_window_function(schema, window_function)
             }
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                let mut columns = HashSet::new();
-
-                self.apply(|expr| {
-                    if let Expr::Column(col) = expr {
-                        columns.insert(col);
-                    }
-
-                    Ok(TreeNodeRecursion::Continue)
-                })?;
-
-                let captured_fields = columns
+                let captured_fields = self
+                    .column_refs()
                     .iter()
-                    .filter(|column| {
-                        column.relation.is_some()
-                            || columns
-                                .iter()
-                                .find(|other| {
-                                    other.relation.is_some()
-                                        && column.name() == other.name()
-                                })
-                                .is_none()
-                    })
-                    .filter_map(|column| {
+                    .map(|column| {
                         let (data_type, nullable) =
-                            schema.data_type_and_nullable(column).ok()?;
-                        let metadata = schema.metadata(column).ok()?;
+                            schema.data_type_and_nullable(column)?;
+                        let metadata = schema.metadata(column)?;
 
                         let field =
                             Field::new(column.name(), data_type.clone(), nullable)
                                 .with_metadata(metadata.clone());
 
-                        Some((column.relation.clone(), Arc::new(field)))
+                        Ok((column.relation.clone(), Arc::new(field)))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<_>>()?;
 
                 let captured_schema =
                     DFSchema::new_with_metadata(captured_fields, Default::default())?;
 
-                //let lambdas_schemas = func.lambdas_schemas_from_args(args, schema.df_schema())?;
                 let lambdas_schemas =
                     func.lambdas_schemas_from_args(args, &captured_schema)?;
 
                 let (arg_types, nullables): (Vec<DataType>, Vec<bool>) =
                     std::iter::zip(args, lambdas_schemas)
-                        .map(|(e, lambda_schema)| match e {
-                            Expr::Lambda { arg_names: _, expr } => {
-                                expr.data_type_and_nullable(&lambda_schema.unwrap())
-                            }
-                            _ => e.data_type_and_nullable(schema),
+                        .map(|(e, schema)| match e {
+                            Expr::Lambda(Lambda {
+                                params: _,
+                                body,
+                            }) => body.data_type_and_nullable(&schema),
+                            _ => e.data_type_and_nullable(&schema),
                         })
                         .collect::<Result<Vec<_>>>()
                         .inspect_err(|_| println!("{self}"))?

@@ -2193,6 +2193,7 @@ dependencies = [
  "paste",
  "petgraph 0.7.1",
  "rand 0.8.5",
+ "recursive",
  "rstest",
 ]
 

@@ -230,7 +230,7 @@ impl<S: SimplifyInfo> ExprSimplifier<S> {
     /// documentation for more details on type coercion
     pub fn coerce(&self, expr: Expr, schema: &DFSchema) -> Result<Expr> {
         let mut expr_rewrite = TypeCoercionRewriter { schema };
-        expr.rewrite_with_lambdas(schema, &mut expr_rewrite).data()
+        expr.rewrite_with_schema(schema, &mut expr_rewrite).data()
     }
 
     /// Input guarantees about the values of columns.

@@ -17,7 +17,6 @@
 
 //! Expression rewriter
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -25,7 +24,6 @@ use std::sync::Arc;
 
 use crate::expr::{Alias, Sort, Unnest};
 use crate::logical_plan::Projection;
-use crate::IS_LAMBDA_ARG;
 use crate::{Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder};
 
 use datafusion_common::config::ConfigOptions;
@@ -64,14 +62,10 @@ pub trait FunctionRewrite: Debug {
 /// Recursively call `LogicalPlanBuilder::normalize` on all [`Column`] expressions
 /// in the `expr` expression tree.
 pub fn normalize_col(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
-    expr.transform_with_lambdas(&plan.schema(), |expr, schema| {
+    expr.transform_up_with_lambdas_params(|expr, lambdas_params| {
         Ok({
             if let Expr::Column(c) = expr {
-                if !schema
-                    .field_from_column(&c)?
-                    .metadata()
-                    .contains_key(IS_LAMBDA_ARG)
-                {
+                if c.relation.is_some() || !lambdas_params.contains(c.name()) {
                     let col = LogicalPlanBuilder::normalize(plan, c)?;
                     Transformed::yes(Expr::Column(col))
                 } else {
@@ -101,60 +95,24 @@ pub fn normalize_col_with_schemas_and_ambiguity_check(
         return Ok(Expr::Unnest(Unnest { expr: Box::new(e) }));
     }
 
-    let lambda_columns = RefCell::new(HashMap::<_, i32>::new());
-
-    expr.transform_down_up(
-        |expr| {
-            if let Expr::Lambda { arg_names, expr: _ } = &expr {
-                for arg in arg_names {
-                    *lambda_columns.borrow_mut().entry(arg.clone()).or_default() += 1;
+    expr.transform_up_with_lambdas_params(|expr, lambdas_params| {
+        Ok({
+            match expr {
+                Expr::Column(c) => {
+                    if c.relation.is_none() && lambdas_params.contains(c.name()) {
+                        Transformed::no(Expr::Column(c))
+                    } else {
+                        let col = c.normalize_with_schemas_and_ambiguity_check(
+                            schemas,
+                            using_columns,
+                        )?;
+                        Transformed::yes(Expr::Column(col))
+                    }
                 }
-
-                println!("{arg_names:?} -> {lambda_columns:?}");
+                _ => Transformed::no(expr),
             }
-
-            Ok(Transformed::no(expr))
-        },
-        |expr| {
-            Ok({
-                match expr {
-                    Expr::Column(c) => {
-                        if c.relation.is_none()
-                            && lambda_columns.borrow().contains_key(c.name())
-                        {
-                            println!("skip {c}");
-                            Transformed::no(Expr::Column(c))
-                        } else {
-                            println!("transform {c}");
-
-                            let col = c.normalize_with_schemas_and_ambiguity_check(
-                                schemas,
-                                using_columns,
-                            )?;
-                            Transformed::yes(Expr::Column(col))
-                        }
-                    }
-                    Expr::Lambda {
-                        ref arg_names,
-                        expr: _,
-                    } => {
-                        let mut lambda_columns = lambda_columns.borrow_mut();
-
-                        for arg in arg_names {
-                            *lambda_columns.get_mut(arg).unwrap() -= 1;
-                        }
-
-                        lambda_columns.retain(|_k, cnt| *cnt > 0);
-
-                        println!("{arg_names:?} -> {lambda_columns:?}");
-
-                        Transformed::no(expr)
-                    }
-                    _ => Transformed::no(expr),
-                }
-            })
-        },
-    )
+        })
+    })
     .data()
 }
 

@@ -20,17 +20,17 @@
 use arrow::{
     array::{
         Array, ArrayRef, ArrowPrimitiveType, AsArray, FixedSizeListArray, LargeListArray,
-        ListArray, PrimitiveArray, RecordBatch,
+        ListArray, PrimitiveArray, RecordBatch, RecordBatchOptions,
     },
-    buffer::OffsetBuffer,
     compute::take_record_batch,
     datatypes::{
         ArrowNativeType, DataType, Field, Int32Type, Int64Type, Schema, UInt32Type,
     },
 };
-use datafusion_common::{exec_err, Result};
+use arrow_schema::FieldRef;
+use datafusion_common::{exec_err, DataFusionError, Result, ScalarValue};
 use datafusion_expr::{
-    ColumnarValue, Documentation, LambdaArgument, ReturnInfo, ScalarFunctionArgMetadata,
+    ColumnarValue, Documentation, LambdaParameter, ReturnInfo, ScalarFunctionArgMetadata,
     ScalarFunctionArgs, ScalarUDFImpl, Signature, ValueOrLambda, Volatility,
 };
 use datafusion_functions::utils::take_function_args;
@@ -125,134 +125,32 @@ impl ScalarUDFImpl for ListMap {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let num_rows = args.number_rows;
         let args = args.into_lambda_args();
 
-        let [ValueOrLambda::Value(list), ValueOrLambda::Lambda(lambda)] =
+        let [ValueOrLambda::Value(list_value), ValueOrLambda::Lambda(lambda)] =
             take_function_args("list_map", args)?
         else {
             unreachable!()
         };
 
-        println!("captures={}\n", lambda.captures.schema_ref());
+        // println!("captures={}\n", lambda.captures.schema_ref());
 
-        enum ListType {
-            List(OffsetBuffer<i32>),
-            LargeList(OffsetBuffer<i64>),
-            FixedSizeList(i32),
-        }
+        let list_array = list_value.to_array(num_rows)?;
+        let list_type = ListType::try_from(list_array.as_ref())?;
 
-        let (field, list, values, nulls, element_indices, captures) = match list
-            .data_type()
-        {
-            DataType::List(_) => {
-                let (field, offsets, values, nulls) =
-                    list.to_array(1)?.as_list::<i32>().clone().into_parts();
+        let adjusted_captures = lambda
+            .captures
+            .map(|captures| take_record_batch(&captures, &list_type.array_indices()))
+            .transpose()?;
 
-                let element_indices = make_list_element_indices::<Int32Type>(&offsets);
+        let values_param = || Ok(Arc::clone(list_type.values()));
+        let indices_param = || Ok(list_type.elements_indices());
 
-                let captured = if lambda.captures.num_columns() > 0 {
-                    let array_indices = make_list_array_indices::<Int32Type>(&offsets);
-
-                    println!("{:?}", array_indices.values().as_ref());
-                    take_record_batch(&lambda.captures, &array_indices)?
-                } else {
-                    lambda.captures.clone()
-                };
-
-                (
-                    field,
-                    ListType::List(offsets),
-                    values,
-                    nulls,
-                    Arc::new(element_indices) as ArrayRef,
-                    captured,
-                )
-            }
-            DataType::LargeList(_) => {
-                let (field, offsets, values, nulls) =
-                    list.to_array(1)?.as_list::<i64>().clone().into_parts();
-
-                let element_indices = make_list_element_indices::<Int64Type>(&offsets);
-
-                let captured = if lambda.captures.num_columns() > 0 {
-                    let array_indices = make_list_array_indices::<Int64Type>(&offsets);
-
-                    take_record_batch(&lambda.captures, &array_indices)?
-                } else {
-                    lambda.captures.clone()
-                };
-
-                (
-                    field,
-                    ListType::LargeList(offsets),
-                    values,
-                    nulls,
-                    Arc::new(element_indices) as ArrayRef,
-                    captured,
-                )
-            }
-            DataType::FixedSizeList(_, _) => {
-                let list = list.to_array(1)?;
-                let (field, size, values, nulls) =
-                    list.as_fixed_size_list().clone().into_parts();
-
-                let element_indices = make_fsl_element_indices(size, list.len());
-
-                let captured = if lambda.captures.num_columns() > 0 {
-                    let array_indices = make_fsl_array_indices(size, list.len());
-
-                    take_record_batch(&lambda.captures, &array_indices)?
-                } else {
-                    lambda.captures.clone()
-                };
-
-                (
-                    field,
-                    ListType::FixedSizeList(size),
-                    values,
-                    nulls,
-                    Arc::new(element_indices) as ArrayRef,
-                    captured,
-                )
-            }
-            _ => unreachable!(),
-        };
-
-        let args = [
-            lambda.args_names.first().map(|values_name| {
-                Arc::new(
-                    Field::new(
-                        values_name,
-                        field.data_type().clone(),
-                        field.is_nullable(),
-                    )
-                    .with_metadata(field.metadata().clone()), //really?
-                )
-            }),
-            lambda.args_names.get(1).map(|index_name| {
-                Arc::new(Field::new(
-                    index_name,
-                    element_indices.data_type().clone(),
-                    false,
-                ))
-            }),
-        ];
-
-        let lambda_batch = RecordBatch::try_new(
-            Arc::new(Schema::new(
-                args.into_iter().flatten()
-                    .chain(captures
-                        .schema()
-                        .fields()
-                        .iter()
-                        .cloned())
-                    .collect::<Vec<_>>(),
-            )),
-            [
-                &[values, element_indices][..lambda.args_names.len()],
-                captures.columns(),
-            ]
-            .concat(),
+        let lambda_batch = merge_captures_with_lambda_params2(
+            adjusted_captures.as_ref(),
+            &lambda.fields,
+            &[&values_param, &indices_param],
         )?;
 
         let mapped_values = lambda
@@ -260,30 +158,42 @@ impl ScalarUDFImpl for ListMap {
             .evaluate(&lambda_batch)?
             .into_array(lambda_batch.num_rows())?;
 
+        //TODO: should metadata be passed? If so, with the same keys or prefixed/suffixed?
         let field = Arc::new(Field::new_list_field(
             mapped_values.data_type().clone(),
             lambda.body.nullable(lambda_batch.schema_ref())?,
         ));
 
-        let list = match list {
-            ListType::List(offsets) => {
-                Arc::new(ListArray::new(field, offsets, mapped_values, nulls)) as ArrayRef
-            }
-            ListType::LargeList(offsets) => {
-                Arc::new(LargeListArray::new(field, offsets, mapped_values, nulls))
-            }
-            ListType::FixedSizeList(size) => {
-                Arc::new(FixedSizeListArray::new(field, size, mapped_values, nulls))
+        let mapped_list = match list_type {
+            ListType::List(list) => Arc::new(ListArray::new(
+                field,
+                list.offsets().clone(),
+                mapped_values,
+                list.nulls().cloned(),
+            )) as ArrayRef,
+            ListType::LargeList(large_list) => Arc::new(LargeListArray::new(
+                field,
+                large_list.offsets().clone(),
+                mapped_values,
+                large_list.nulls().cloned(),
+            )),
+            ListType::FixedSizeList(fixed_size_list) => {
+                Arc::new(FixedSizeListArray::new(
+                    field,
+                    fixed_size_list.value_length(),
+                    mapped_values,
+                    fixed_size_list.nulls().cloned(),
+                ))
             }
         };
 
-        Ok(ColumnarValue::Array(Arc::new(list)))
+        Ok(ColumnarValue::Array(mapped_list))
     }
 
-    fn lambdas_arguments(
+    fn lambdas_parameters(
         &self,
         args: &[ScalarFunctionArgMetadata],
-    ) -> Result<Vec<Option<Vec<LambdaArgument>>>> {
+    ) -> Result<Vec<Option<Vec<LambdaParameter>>>> {
         let [ScalarFunctionArgMetadata::Value(list), ScalarFunctionArgMetadata::Lambda(_)] =
             args
         else {
@@ -301,9 +211,9 @@ impl ScalarUDFImpl for ListMap {
             _ => return exec_err!("expected list, got {list}"),
         };
 
-        let value = LambdaArgument::new(field.data_type().clone(), field.is_nullable())
+        let value = LambdaParameter::new(field.data_type().clone(), field.is_nullable())
             .with_metadata(field.metadata().clone());
-        let index = LambdaArgument::new(index_type, false);
+        let index = LambdaParameter::new(index_type, false);
 
         Ok(vec![None, Some(vec![value, index])])
     }
@@ -324,7 +234,10 @@ fn make_list_array_indices<T: ArrowPrimitiveType>(
         Vec::with_capacity(offsets.last().unwrap().as_usize() - offsets[0].as_usize());
 
     for (i, (&start, &end)) in std::iter::zip(offsets, &offsets[1..]).enumerate() {
-        indices.extend(repeat_n(T::Native::usize_as(i), end.as_usize() - start.as_usize()));
+        indices.extend(repeat_n(
+            T::Native::usize_as(i),
+            end.as_usize() - start.as_usize(),
+        ));
     }
 
     PrimitiveArray::new(indices.into(), None)
@@ -377,13 +290,166 @@ fn make_fsl_element_indices(
     PrimitiveArray::new(indices.into(), None)
 }
 
+/// Merge the lambda body captured columns with it's arguments
+/// Datafusion relies on an unspecified field ordering implemented in this function
+/// As such, this is the only correct way to merge the captured values with the arguments
+fn merge_captures_with_lambda_params(
+    captures: Option<&RecordBatch>,
+    params: &[FieldRef],
+    args: &[ArrayRef],
+) -> Result<RecordBatch> {
+    let (fields, columns) = match captures {
+        Some(captures) => {
+            let fields = params
+                .iter()
+                .cloned()
+                .chain(captures.schema().fields().iter().cloned())
+                .collect::<Vec<_>>();
+
+            let columns = [args, captures.columns()].concat();
+
+            (fields, columns)
+        }
+        None => (params.to_vec(), args.to_vec()),
+    };
+
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?)
+}
+
+fn merge_captures_with_lambda_params2(
+    captures: Option<&RecordBatch>,
+    params: &[FieldRef],
+    args: &[&dyn Fn() -> Result<ArrayRef>],
+) -> Result<RecordBatch> {
+    merge_captures_with_lambda_params(
+        captures,
+        params,
+        &args
+            .iter()
+            .take(params.len())
+            .map(|arg| arg())
+            .collect::<Result<Vec<_>>>()?,
+    )
+}
+
+fn merge_captures_with_lambda_params3(
+    captures: Option<&RecordBatch>,
+    params: &[FieldRef],
+    args: &[Box<dyn Fn() -> Result<ArrayRef>>],
+) -> Result<RecordBatch> {
+    merge_captures_with_lambda_params(
+        captures,
+        params,
+        &args
+            .iter()
+            .take(params.len())
+            .map(|arg| arg())
+            .collect::<Result<Vec<_>>>()?,
+    )
+}
+
+enum ListType<'a> {
+    List(&'a ListArray),
+    LargeList(&'a LargeListArray),
+    FixedSizeList(&'a FixedSizeListArray),
+}
+
+impl<'a> TryFrom<&'a dyn Array> for ListType<'a> {
+    type Error = DataFusionError;
+
+    fn try_from(array: &'a dyn Array) -> std::result::Result<Self, Self::Error> {
+        match array.data_type() {
+            DataType::List(_) => Ok(ListType::List(array.as_list())),
+            DataType::LargeList(_) => Ok(ListType::LargeList(array.as_list())),
+            DataType::FixedSizeList(_, _) => {
+                Ok(ListType::FixedSizeList(array.as_fixed_size_list()))
+            }
+            data_type => exec_err!("expected list, got {data_type}"),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a ScalarValue> for ListType<'a> {
+    type Error = DataFusionError;
+
+    fn try_from(value: &'a ScalarValue) -> std::result::Result<Self, Self::Error> {
+        match value {
+            ScalarValue::List(list) => Ok(ListType::List(list)),
+            ScalarValue::LargeList(list) => Ok(ListType::LargeList(list)),
+            ScalarValue::FixedSizeList(list) => Ok(ListType::FixedSizeList(list)),
+            _ => exec_err!("expected list, got {}", value.data_type()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a ColumnarValue> for ListType<'a> {
+    type Error = DataFusionError;
+
+    fn try_from(value: &'a ColumnarValue) -> std::result::Result<Self, Self::Error> {
+        match value {
+            ColumnarValue::Array(array) => array.as_ref().try_into(),
+            ColumnarValue::Scalar(scalar_value) => scalar_value.try_into(),
+        }
+    }
+}
+
+impl ListType<'_> {
+    fn values(&self) -> &ArrayRef {
+        match self {
+            ListType::List(list) => list.values(),
+            ListType::LargeList(large_list) => large_list.values(),
+            ListType::FixedSizeList(fixed_size_list) => fixed_size_list.values(),
+        }
+    }
+
+    fn array_indices(&self) -> ArrayRef {
+        match self {
+            ListType::List(list) => {
+                Arc::new(make_list_array_indices::<Int32Type>(list.offsets()))
+            }
+            ListType::LargeList(large_list) => {
+                Arc::new(make_list_array_indices::<Int64Type>(large_list.offsets()))
+            }
+            ListType::FixedSizeList(fixed_size_list) => Arc::new(make_fsl_array_indices(
+                fixed_size_list.value_length(),
+                fixed_size_list.len(),
+            )),
+        }
+    }
+
+    fn elements_indices(&self) -> ArrayRef {
+        match self {
+            ListType::List(list) => {
+                Arc::new(make_list_element_indices::<Int32Type>(list.offsets()))
+            }
+            ListType::LargeList(large_list) => {
+                Arc::new(make_list_element_indices::<Int64Type>(large_list.offsets()))
+            }
+            ListType::FixedSizeList(fixed_size_list) => {
+                Arc::new(make_fsl_element_indices(
+                    fixed_size_list.value_length(),
+                    fixed_size_list.len(),
+                ))
+            }
+        }
+    }
+}
+
 /*
 Expr::Lambda
 Lambda PhysicalExpr
 Expr::Lambda -> PhysicalExpr
-Expr::*_with_lambdas
-ExprSchemaNode = ExprContext<Arc<Schema>>
+Expr::*_with_lambdas_params
+PhysicalExpr::*_with_lambdas_params
 extend ScalarUDF[Impl]
+Expr::*_with_schema
+PhysicalExpr::*_with_schema
+sql parse+unparse
 list_map
+remove unsupported comments from lambda docs
 capture support
+remove unsupported comments from lambda capture docs
 */

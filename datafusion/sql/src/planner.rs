@@ -114,7 +114,7 @@ pub struct PlannerContext {
     /// The query schema defined by the table
     create_table_schema: Option<DFSchemaRef>,
     /// The lambda introduced columns names
-    lambdas_arguments: HashSet<String>,
+    lambdas_parameters: HashSet<String>,
 }
 
 impl Default for PlannerContext {
@@ -132,7 +132,7 @@ impl PlannerContext {
             outer_query_schema: None,
             outer_from_schema: None,
             create_table_schema: None,
-            lambdas_arguments: HashSet::new(),
+            lambdas_parameters: HashSet::new(),
         }
     }
 
@@ -219,15 +219,15 @@ impl PlannerContext {
         self.ctes.get(cte_name).map(|cte| cte.as_ref())
     }
 
-    pub fn lambdas_arguments(&self) -> &HashSet<String> {
-        &self.lambdas_arguments
+    pub fn lambdas_parameters(&self) -> &HashSet<String> {
+        &self.lambdas_parameters
     }
 
-    pub fn with_lambda_arguments(
+    pub fn with_lambda_parameters(
         mut self,
         arguments: impl IntoIterator<Item = String>,
     ) -> Self {
-        self.lambdas_arguments.extend(arguments);
+        self.lambdas_parameters.extend(arguments);
 
         self
     }
@@ -366,8 +366,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
     ) -> Result<()> {
         exprs
             .iter()
-            .map(|expr| expr.column_refs_with_lambdas(schema))
-            .flatten()
+            .flat_map(|expr| expr.column_refs())
             .try_for_each(|col| {
                 match &col.relation {
                     Some(r) => schema.field_with_qualified_name(r, &col.name).map(|_| ()),

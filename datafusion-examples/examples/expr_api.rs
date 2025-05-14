@@ -383,7 +383,7 @@ fn type_coercion_demo() -> Result<()> {
     // 3. Type coercion with `TypeCoercionRewriter`.
     let coerced_expr = expr
         .clone()
-        .rewrite_with_lambdas(&df_schema, &mut TypeCoercionRewriter::new(&df_schema))?
+        .rewrite_with_schema(&df_schema, &mut TypeCoercionRewriter::new(&df_schema))?
         .data;
     let physical_expr = datafusion::physical_expr::create_physical_expr(
         &coerced_expr,

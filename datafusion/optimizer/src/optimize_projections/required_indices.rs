@@ -113,7 +113,7 @@ impl RequiredIndices {
     /// * `expr`: An expression for which we want to find necessary field indices.
     fn add_expr(&mut self, input_schema: &DFSchemaRef, expr: &Expr) {
         // TODO could remove these clones (and visit the expression directly)
-        let mut cols = expr.column_refs_with_lambdas(&input_schema);
+        let mut cols = expr.column_refs();
         // Get outer-referenced (subquery) columns:
         outer_columns(expr, &mut cols);
         self.indices.reserve(cols.len());

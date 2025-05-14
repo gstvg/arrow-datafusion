@@ -62,45 +62,47 @@ use datafusion_expr::ColumnarValue;
 /// ```
 /// [logical `Expr::Column`]: https://docs.rs/datafusion/latest/datafusion/logical_expr/enum.Expr.html#variant.Column
 #[derive(Debug, Eq, Clone)]
-pub struct Lambda {
-    inner: Arc<dyn PhysicalExpr>,
-    args: Vec<String>,
+pub struct LambdaExpr {
+    params: Vec<String>,
+    body: Arc<dyn PhysicalExpr>,
 }
 
-impl PartialEq for Lambda {
+// Manually derive PartialEq and Hash to work around https://github.com/rust-lang/rust/issues/78808 [https://github.com/apache/datafusion/issues/13196]
+impl PartialEq for LambdaExpr {
     fn eq(&self, other: &Self) -> bool {
-        self.inner.eq(&other.inner)
+        self.params.eq(&other.params) && self.body.eq(&other.body)
     }
 }
 
-impl Hash for Lambda {
+impl Hash for LambdaExpr {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.inner.hash(state);
+        self.params.hash(state);
+        self.body.hash(state);
     }
 }
 
-impl Lambda {
-    /// Create a new lambda expression with the given body and arguments names
-    pub fn new(inner: Arc<dyn PhysicalExpr>, args: Vec<String>) -> Self {
-        Self { inner, args }
+impl LambdaExpr {
+    /// Create a new lambda expression with the given body and parameters
+    pub fn new(params: Vec<String>, body: Arc<dyn PhysicalExpr>) -> Self {
+        Self { params, body }
     }
 
-    pub fn inner(&self) -> &Arc<dyn PhysicalExpr> {
-        &self.inner
+    pub fn params(&self) -> &[String] {
+        &self.params
     }
 
-    pub fn args(&self) -> &[String] {
-        &self.args
+    pub fn body(&self) -> &Arc<dyn PhysicalExpr> {
+        &self.body
     }
 }
 
-impl std::fmt::Display for Lambda {
+impl std::fmt::Display for LambdaExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "lambda(({}) -> {})", self.args.join(", "), self.inner)
+        write!(f, "lambda(({}) -> {})", self.params.join(", "), self.body)
     }
 }
 
-impl PhysicalExpr for Lambda {
+impl PhysicalExpr for LambdaExpr {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -118,20 +120,16 @@ impl PhysicalExpr for Lambda {
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
-        vec![&self.inner]
+        vec![&self.body]
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        mut children: Vec<Arc<dyn PhysicalExpr>>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        if let Some(inner) = children.pop() {
-            Ok(Arc::new(Self {
-                inner,
-                args: self.args.clone(),
-            }))
-        } else {
-            Ok(self)
-        }
+        Ok(Arc::new(Self {
+            params: self.params.clone(),
+            body: Arc::clone(&children[0]),
+        }))
     }
 }
