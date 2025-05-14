@@ -41,15 +41,14 @@ use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, Schema};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{internal_err, DFSchema, HashSet, Result, ScalarValue};
-use arrow::datatypes::{DataType, Field, Schema};
-use datafusion_common::{internal_err, Result, ScalarValue};
+use arrow::datatypes::Field;
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
-    expr_vec_fmt, ColumnarValue, Expr, ReturnTypeArgs, ScalarFunctionArgMetadata,
+    expr_vec_fmt, ColumnarValue, ScalarFunctionArgMetadata,
     ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
-    expr_vec_fmt, ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF,
+    ReturnFieldArgs,
 };
 
 /// Physical expression of a scalar function
@@ -99,9 +98,9 @@ impl ScalarFunctionExpr {
         let arg_fields = std::iter::zip(&args, lambdas_schemas)
             .map(|(e, schema)| {
                 if let Some(lambda) = e.as_any().downcast_ref::<LambdaExpr>() {
-                    lambda.body().return_field(schema)
+                    lambda.body().return_field(&schema)
                 } else {
-                    e.return_field(schema)
+                    e.return_field(&schema)
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -254,7 +253,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                                 .map(|(name, param)| Arc::new(param.into_field(name)))
                                 .collect();
 
-                        let captures = if indices.len() > 0 {
+                        let captures = if !indices.is_empty() {
                             Some(batch.project(&indices)?)
                         } else {
                             None
@@ -511,36 +510,4 @@ impl PhysicalExprExt for Arc<dyn PhysicalExpr> {
             self.apply_children(|e| f(e, schema))
         }
     }
-}
-
-/// Create a physical expression for the UDF.
-#[deprecated(since = "45.0.0", note = "use ScalarFunctionExpr::new() instead")]
-pub fn create_physical_expr(
-    fun: &ScalarUDF,
-    input_phy_exprs: &[Arc<dyn PhysicalExpr>],
-    input_schema: &Schema,
-    args: &[Expr],
-    input_dfschema: &DFSchema,
-) -> Result<Arc<dyn PhysicalExpr>> {
-    let input_expr_types = input_phy_exprs
-        .iter()
-        .map(|e| e.data_type(input_schema))
-        .collect::<Result<Vec<_>>>()?;
-
-    // verify that input data types is consistent with function's `TypeSignature`
-    data_types_with_scalar_udf(&input_expr_types, fun)?;
-
-    // Since we have arg_types, we don't need args and schema.
-    let return_type =
-        fun.return_type_from_exprs(args, input_dfschema, &input_expr_types)?;
-
-    Ok(Arc::new(
-        ScalarFunctionExpr::new(
-            fun.name(),
-            Arc::new(fun.clone()),
-            input_phy_exprs.to_vec(),
-            return_type,
-        )
-        .with_nullable(fun.is_nullable(args, input_dfschema)),
-    ))
 }

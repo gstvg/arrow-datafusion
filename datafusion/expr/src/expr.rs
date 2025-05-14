@@ -2715,6 +2715,9 @@ impl Display for SchemaDisplay<'_> {
                     write!(f, " {window_frame}")
                 }
             },
+            Expr::Lambda(Lambda { params, body }) => {
+                write!(f, "{} -> {body}", display_comma_separated(params))
+            }
         }
     }
 }

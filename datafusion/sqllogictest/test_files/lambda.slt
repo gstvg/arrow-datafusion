@@ -72,10 +72,10 @@ query TT
 EXPLAIN SELECT list_map([1, 2], (e, i) -> e+i);
 ----
 logical_plan
-01)Projection: list_map(List([1, 2]), (e, i) -> e + CAST(i AS Int64)) AS list_map(make_array(Int64(1),Int64(2)),(e, i) -> e + i)
+01)Projection: list_map(List([1, 2]), (e, i) -> e + CAST(i AS Int64)) AS list_map(make_array(Int64(1),Int64(2)),e, i -> e + i)
 02)--EmptyRelation
 physical_plan
-01)ProjectionExec: expr=[list_map([1, 2], lambda((e, i) -> e@0 + CAST(i@1 AS Int64))) as list_map(make_array(Int64(1),Int64(2)),(e, i) -> e + i)]
+01)ProjectionExec: expr=[list_map([1, 2], lambda((e, i) -> e@0 + CAST(i@1 AS Int64))) as list_map(make_array(Int64(1),Int64(2)),e, i -> e + i)]
 02)--PlaceholderRowExec
 
 #cse
@@ -83,10 +83,10 @@ query TT
 explain select n + 1, list_map([1], v -> v + n + 1) from t;
 ----
 logical_plan
-01)Projection: t.n + Int64(1), list_map(List([1]), (v) -> v + t.n + Int64(1)) AS list_map(make_array(Int64(1)),(v) -> v + t.n + Int64(1))
+01)Projection: t.n + Int64(1), list_map(List([1]), (v) -> v + t.n + Int64(1)) AS list_map(make_array(Int64(1)),v -> v + t.n + Int64(1))
 02)--TableScan: t projection=[n]
 physical_plan
-01)ProjectionExec: expr=[n@0 + 1 as t.n + Int64(1), list_map([1], lambda((v) -> v@0 + n@1 + 1)) as list_map(make_array(Int64(1)),(v) -> v + t.n + Int64(1))]
+01)ProjectionExec: expr=[n@0 + 1 as t.n + Int64(1), list_map([1], lambda((v) -> v@0 + n@1 + 1)) as list_map(make_array(Int64(1)),v -> v + t.n + Int64(1))]
 02)--DataSourceExec: partitions=1, partition_sizes=[1]
 
 query ?
@@ -118,10 +118,10 @@ query TT
 EXPLAIN SELECT list_map([1,2,3,4,5], v -> v*2);
 ----
 logical_plan
-01)Projection: list_map(List([1, 2, 3, 4, 5]), (v) -> v * Int64(2)) AS list_map(make_array(Int64(1),Int64(2),Int64(3),Int64(4),Int64(5)),(v) -> v * Int64(2))
+01)Projection: list_map(List([1, 2, 3, 4, 5]), (v) -> v * Int64(2)) AS list_map(make_array(Int64(1),Int64(2),Int64(3),Int64(4),Int64(5)),v -> v * Int64(2))
 02)--EmptyRelation
 physical_plan
-01)ProjectionExec: expr=[list_map([1, 2, 3, 4, 5], lambda((v) -> v@0 * 2)) as list_map(make_array(Int64(1),Int64(2),Int64(3),Int64(4),Int64(5)),(v) -> v * Int64(2))]
+01)ProjectionExec: expr=[list_map([1, 2, 3, 4, 5], lambda((v) -> v@0 * 2)) as list_map(make_array(Int64(1),Int64(2),Int64(3),Int64(4),Int64(5)),v -> v * Int64(2))]
 02)--PlaceholderRowExec
 
 

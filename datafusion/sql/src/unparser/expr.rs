@@ -21,11 +21,10 @@ use sqlparser::ast::{
     self, Array, BinaryOperator, Expr as AstExpr, Function, Ident, Interval,
     LambdaFunction, ObjectName, Subscript, TimezoneInfo, UnaryOperator,
 };
-use datafusion_expr::expr::{AggregateFunctionParams, Unnest, WindowFunctionParams};
-use sqlparser::ast::Value::SingleQuotedString;
+use datafusion_expr::expr::{AggregateFunctionParams, WindowFunctionParams};
 use sqlparser::ast::{
-    self, Array, BinaryOperator, CaseWhen, Expr as AstExpr, Function, Ident, Interval,
-    ObjectName, OrderByOptions, Subscript, TimezoneInfo, UnaryOperator, ValueWithSpan,
+    CaseWhen,
+    OrderByOptions, ValueWithSpan,
 };
 use std::sync::Arc;
 use std::vec;

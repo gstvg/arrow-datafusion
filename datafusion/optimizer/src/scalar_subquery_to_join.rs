@@ -390,7 +390,7 @@ fn build_join(
                 schema: new_plan.schema(),
             };
             computation_project_expr
-                .insert(name, computer_expr.rewrite(&mut expr_rewrite).data()?);
+                .insert(name, computer_expr.rewrite_with_schema(new_plan.schema(), &mut expr_rewrite).data()?);
         }
     }
 

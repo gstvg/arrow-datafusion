@@ -104,7 +104,7 @@ pub use udaf::{
     SetMonotonicity, StatisticsArgs,
 };
 pub use udf::{
-    scalar_doc_sections, LambdaParameter, ReturnFieldArgs, ReturnInfo, ReturnTypeArgs,
+    scalar_doc_sections, LambdaParameter, ReturnFieldArgs,
     ScalarFunctionArgMetadata, ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
     ScalarUDFImpl, ValueOrLambda
 };

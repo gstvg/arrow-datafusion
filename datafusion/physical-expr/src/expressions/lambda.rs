@@ -132,4 +132,8 @@ impl PhysicalExpr for LambdaExpr {
             body: Arc::clone(&children[0]),
         }))
     }
+    
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}) -> {}", self.params.join(", "), self.body)
+    }
 }

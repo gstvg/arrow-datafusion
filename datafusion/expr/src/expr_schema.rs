@@ -17,9 +17,8 @@
 
 use super::{Between, Expr, Like};
 use crate::expr::{
-    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Lambda, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction
-    AggregateFunction, AggregateFunctionParams, Alias, BinaryExpr, Cast, InList,
-    InSubquery, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction,
+    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Lambda, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction,
+    AggregateFunctionParams,
     WindowFunctionParams,
 };
 use crate::type_coercion::functions::{
@@ -31,9 +30,7 @@ use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::{
     not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError,
-    ExprSchema, Result, TableReference,
-    not_impl_err, plan_datafusion_err, plan_err, Column, DataFusionError, ExprSchema,
-    Result, Spans, TableReference,
+    ExprSchema, Result, TableReference, Spans
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
@@ -482,11 +479,10 @@ impl ExprSchemable for Expr {
                     func.lambdas_schemas_from_args(args, &captured_schema)?;
 
                 let (arg_types, fields): (Vec<DataType>, Vec<Arc<Field>>) = std::iter::zip(args, lambdas_schemas)
-                    .iter()
                     // .map(|(e, schema)| e.to_field(schema).map(|(_, f)| f))
                     .map(|(e, schema)| match e {
-                        Expr::Lambda(Lambda{ params: _, body}) => body.to_field(schema).map(|(_, f)| f),
-                        _ => e.to_field(schema).map(|(_, f)| f)
+                        Expr::Lambda(Lambda{ params: _, body}) => body.to_field(&schema).map(|(_, f)| f),
+                        _ => e.to_field(&schema).map(|(_, f)| f)
                     })
                     .collect::<Result<Vec<_>>>()?
                     .into_iter()

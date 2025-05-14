@@ -21,7 +21,7 @@ use crate::expr::{schema_name_from_exprs_comma_separated_without_space, Lambda};
 use crate::simplify::{ExprSimplifyResult, SimplifyInfo};
 use crate::sort_properties::{ExprProperties, SortProperties};
 use crate::{
-    ColumnarValue, Documentation, Expr, ExprSchemable, ScalarFunctionImplementation,
+    ColumnarValue, Documentation, Expr, ExprSchemable,
     Signature,
 };
 use arrow::array::RecordBatch;
@@ -30,9 +30,6 @@ use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{
     exec_err, not_impl_err, DFSchema, ExprSchema, HashSet, Result, ScalarValue,
 };
-use crate::{ColumnarValue, Documentation, Expr, Signature};
-use arrow::datatypes::{DataType, Field};
-use datafusion_common::{not_impl_err, ExprSchema, Result, ScalarValue};
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
@@ -439,7 +436,7 @@ where
 
 /// Arguments passed to [`ScalarUDFImpl::invoke_with_args`] when invoking a
 /// scalar function.
-pub struct ScalarFunctionArgs<'a, 'b> {
+pub struct ScalarFunctionArgs<'a, 'b, 'c> {
     /// The evaluated arguments to the function
     /// If it's a lambda, will be `ColumnarValue::Scalar(ScalarValue::Null)`
     pub args: Vec<ColumnarValue>,
@@ -453,7 +450,7 @@ pub struct ScalarFunctionArgs<'a, 'b> {
     pub return_field: &'b Field,
     /// The lambdas passed to the function
     /// If it's not a lambda it will be `None`
-    pub lambdas: Vec<Option<ScalarFunctionLambdaArg<'a>>>,
+    pub lambdas: Vec<Option<ScalarFunctionLambdaArg<'c>>>,
 }
 
 pub struct ScalarFunctionLambdaArg<'a> {
@@ -463,8 +460,8 @@ pub struct ScalarFunctionLambdaArg<'a> {
     pub captures: Option<RecordBatch>,
 }
 
-impl<'a> ScalarFunctionArgs<'a> {
-    pub fn into_lambda_args(self) -> Vec<ValueOrLambda<'a>> {
+impl<'c> ScalarFunctionArgs<'_, '_, 'c> {
+    pub fn into_lambda_args(self) -> Vec<ValueOrLambda<'c>> {
         std::iter::zip(self.args, self.lambdas)
             .map(|(arg, lambda)| match lambda {
                 Some(lambda) => ValueOrLambda::Lambda(lambda),

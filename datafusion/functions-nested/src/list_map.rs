@@ -20,20 +20,19 @@
 use arrow::{
     array::{
         Array, ArrayRef, ArrowPrimitiveType, AsArray, FixedSizeListArray, LargeListArray,
-        ListArray, PrimitiveArray, RecordBatch, RecordBatchOptions,
+        ListArray, PrimitiveArray, RecordBatch
     },
     compute::take_record_batch,
     datatypes::{
         ArrowNativeType, DataType, Field, Int32Type, Int64Type, Schema, UInt32Type,
     },
 };
-use arrow_schema::FieldRef;
-use datafusion_common::{exec_err, DataFusionError, Result, ScalarValue};
+use arrow::datatypes::FieldRef;
+use datafusion_common::{exec_err, utils::take_function_args, DataFusionError, Result, ScalarValue};
 use datafusion_expr::{
-    ColumnarValue, Documentation, LambdaParameter, ReturnInfo, ScalarFunctionArgMetadata,
+    ColumnarValue, Documentation, LambdaParameter, ScalarFunctionArgMetadata,
     ScalarFunctionArgs, ScalarUDFImpl, Signature, ValueOrLambda, Volatility,
 };
-use datafusion_functions::utils::take_function_args;
 use datafusion_macros::user_doc;
 use std::iter::repeat_n;
 use std::{any::Any, sync::Arc};
@@ -101,27 +100,24 @@ impl ScalarUDFImpl for ListMap {
         unreachable!()
     }
 
-    fn return_type_from_args(
+    fn return_field_from_args(
         &self,
-        args: datafusion_expr::ReturnTypeArgs,
-    ) -> Result<ReturnInfo> {
+        args: datafusion_expr::ReturnFieldArgs,
+    ) -> Result<Field> {
         if args.lambdas != [false, true] {
             return exec_err!("");
         }
 
-        let field = Arc::new(Field::new_list_field(
-            args.arg_types[1].clone(),
-            args.nullables[1],
-        ));
+        let field = Arc::new(args.arg_fields[1].clone().with_name(Field::LIST_FIELD_DEFAULT_NAME));
 
-        let return_type = match &args.arg_types[0] {
+        let return_type = match &args.arg_fields[0].data_type() {
             DataType::List(_) => DataType::List(field),
             DataType::LargeList(_) => DataType::LargeList(field),
             DataType::FixedSizeList(_, size) => DataType::FixedSizeList(field, *size),
             _ => unreachable!(),
         };
 
-        Ok(ReturnInfo::new(return_type, args.nullables[0]))
+        Ok(Field::new("", return_type, args.arg_fields[0].is_nullable()))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {

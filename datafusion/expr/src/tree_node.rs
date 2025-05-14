@@ -22,10 +22,7 @@ use std::collections::HashSet;
 use crate::expr::{
     AggregateFunction, Alias, Between, BinaryExpr, Case, Cast, GroupingSet, InList,
     InSubquery, Lambda, Like, Placeholder, ScalarFunction, TryCast, Unnest,
-    WindowFunction,
-    AggregateFunction, AggregateFunctionParams, Alias, Between, BinaryExpr, Case, Cast,
-    GroupingSet, InList, InSubquery, Like, Placeholder, ScalarFunction, TryCast, Unnest,
-    WindowFunction, WindowFunctionParams,
+    WindowFunction, AggregateFunctionParams,WindowFunctionParams,
 };
 use crate::{Expr, ExprFunctionExt};
 use datafusion_common::tree_node::{
@@ -844,6 +841,10 @@ mod tests {
                     field.is_nullable(),
                 )]),
             ])
+        }
+        
+        fn invoke_with_args(&self, _args: crate::ScalarFunctionArgs) -> Result<datafusion_expr_common::columnar_value::ColumnarValue> {
+            todo!()
         }
     }
 

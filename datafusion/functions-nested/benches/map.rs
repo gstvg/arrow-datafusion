@@ -110,6 +110,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                         ],
                         number_rows: 1,
                         return_field,
+                        lambdas: vec![],
                     })
                     .expect("map should work on valid values"),
             );

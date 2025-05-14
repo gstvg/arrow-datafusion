@@ -24,8 +24,8 @@ use datafusion_common::{
 };
 use datafusion_expr::expr::{Lambda, ScalarFunction, Unnest};
 use datafusion_expr::planner::PlannerResult;
-use datafusion_expr::expr::{ScalarFunction, Unnest, WildcardOptions};
-use datafusion_expr::planner::{PlannerResult, RawAggregateExpr, RawWindowExpr};
+use datafusion_expr::expr::WildcardOptions;
+use datafusion_expr::planner::{RawAggregateExpr, RawWindowExpr};
 use datafusion_expr::{
     expr, Expr, ExprFunctionExt, ExprSchemable, WindowFrame, WindowFunctionDefinition,
 };
