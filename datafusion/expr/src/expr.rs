@@ -363,7 +363,9 @@ pub enum Expr {
     OuterReferenceColumn(DataType, Column),
     /// Unnest expression
     Unnest(Unnest),
-    /// Lambda expression, should only exist as a scalar function argument
+    /// Lambda expression, valid only as a scalar function argument
+    /// Note that it has it's own scoped schema, different from the plan schema,
+    /// that can be constructed with ScalarUDF::arguments_schemas and variants
     Lambda(Lambda),
 }
 

@@ -106,7 +106,7 @@ pub use udaf::{
 pub use udf::{
     scalar_doc_sections, LambdaParameter, ReturnFieldArgs,
     ScalarFunctionArgMetadata, ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
-    ScalarUDFImpl, ValueOrLambda
+    ScalarUDFImpl, ValueOrLambda, ValueOrLambdaField
 };
 pub use udwf::{window_doc_sections, ReversedUDWF, WindowUDF, WindowUDFImpl};
 pub use window_frame::{WindowFrame, WindowFrameBound, WindowFrameUnits};

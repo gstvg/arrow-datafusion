@@ -30,6 +30,7 @@
 //! to a function that supports f64, it is coerced to f64.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -38,17 +39,16 @@ use crate::expressions::{Column, LambdaExpr, Literal};
 use crate::PhysicalExpr;
 
 use arrow::array::{Array, RecordBatch};
+use arrow::datatypes::Field;
 use arrow::datatypes::{DataType, Schema};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{internal_err, DFSchema, HashSet, Result, ScalarValue};
-use arrow::datatypes::Field;
+use datafusion_common::{internal_err, HashSet, Result, ScalarValue};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::data_types_with_scalar_udf;
 use datafusion_expr::{
-    expr_vec_fmt, ColumnarValue, ScalarFunctionArgMetadata,
+    expr_vec_fmt, ColumnarValue, ReturnFieldArgs, ScalarFunctionArgMetadata,
     ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
-    ReturnFieldArgs,
 };
 
 /// Physical expression of a scalar function
@@ -110,7 +110,7 @@ impl ScalarFunctionExpr {
             .iter()
             .map(|f| f.data_type().clone())
             .collect::<Vec<_>>();
-        
+
         data_types_with_scalar_udf(&arg_types, &fun)?;
 
         let arguments = args
@@ -135,7 +135,7 @@ impl ScalarFunctionExpr {
 
         let return_field = fun.return_field_from_args(ret_args)?;
         let name = fun.name().to_string();
-        
+
         Ok(Self {
             fun,
             name,
@@ -216,14 +216,18 @@ impl PhysicalExpr for ScalarFunctionExpr {
             .iter()
             .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
 
-        let params = self.fun().inner().lambdas_parameters(&std::iter::zip(&self.args, &args)
-        .map(
-            |(expr, value)| match expr.as_any().downcast_ref::<LambdaExpr>() {
-                Some(lambda) => ScalarFunctionArgMetadata::Lambda(lambda.params()),
-                None => ScalarFunctionArgMetadata::Value(value.data_type()),
-            },
-        )
-        .collect::<Vec<_>>())?;
+        let params = self.fun().inner().lambdas_parameters(
+            &std::iter::zip(&self.args, &args)
+                .map(
+                    |(expr, value)| match expr.as_any().downcast_ref::<LambdaExpr>() {
+                        Some(lambda) => {
+                            ScalarFunctionArgMetadata::Lambda(lambda.params())
+                        }
+                        None => ScalarFunctionArgMetadata::Value(value.data_type()),
+                    },
+                )
+                .collect::<Vec<_>>(),
+        )?;
 
         let lambdas = std::iter::zip(&self.args, params)
             .map(|(arg, lambda_params)| {
@@ -356,11 +360,11 @@ impl PhysicalExpr for ScalarFunctionExpr {
     }
 }
 
-pub fn lambdas_schemas_from_args(
+pub fn lambdas_schemas_from_args<'a>(
     fun: &ScalarUDF,
     args: &[Arc<dyn PhysicalExpr>],
-    schema: &Schema,
-) -> Result<Vec<Schema>> {
+    schema: &'a Schema,
+) -> Result<Vec<Cow<'a, Schema>>> {
     let args_metadata = args
         .iter()
         .map(|e| match e.as_any().downcast_ref::<LambdaExpr>() {
@@ -393,15 +397,7 @@ pub fn lambdas_schemas_from_args(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(fun
-        .lambdas_schemas(
-            &args_metadata,
-            &captures,
-            &DFSchema::try_from(schema.clone()).unwrap(),
-        )?
-        .into_iter()
-        .map(|dfschema| dfschema.into_owned().into())
-        .collect())
+    fun.arguments_arrow_schema(&args_metadata, &captures, schema)
 }
 
 pub trait PhysicalExprExt {

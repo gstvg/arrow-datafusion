@@ -25,7 +25,7 @@ use crate::type_coercion::functions::{
     data_types_with_aggregate_udf, data_types_with_scalar_udf, data_types_with_window_udf,
 };
 use crate::udf::ReturnFieldArgs;
-use crate::{utils, LogicalPlan, Projection, Subquery, WindowFunctionDefinition};
+use crate::{utils, LogicalPlan, Projection, ScalarFunctionArgMetadata, Subquery, WindowFunctionDefinition};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::{
@@ -456,27 +456,38 @@ impl ExprSchemable for Expr {
             }
             // Expr::Lambda(Lambda { params, body}) => body.to_field(schema),
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                let captured_fields = self
-                    .column_refs()
-                    .iter()
-                    .map(|column| {
-                        let (data_type, nullable) =
-                            schema.data_type_and_nullable(column)?;
-                        let metadata = schema.metadata(column)?;
+                // let captured_fields = self
+                //     .column_refs()
+                //     .iter()
+                //     .map(|column| {
+                //         let (data_type, nullable) =
+                //             schema.data_type_and_nullable(column)?;
+                //         let metadata = schema.metadata(column)?;
 
-                        let field =
-                            Field::new(column.name(), data_type.clone(), nullable)
-                                .with_metadata(metadata.clone());
+                //         let field =
+                //             Field::new(column.name(), data_type.clone(), nullable)
+                //                 .with_metadata(metadata.clone());
 
-                        Ok((column.relation.clone(), Arc::new(field)))
+                //         Ok((column.relation.clone(), Arc::new(field)))
+                //     })
+                //     .collect::<Result<_>>()?;
+
+                // let captured_schema =
+                //     DFSchema::new_with_metadata(captured_fields, Default::default())?;
+
+                // let lambdas_schemas =
+                //     func.lambdas_schemas_from_args(args, &captured_schema)?;
+
+                let args_metadata = args.iter()
+                    .map(|arg| match arg {
+                        Expr::Lambda(Lambda { params, body: _ }) => {
+                            Ok(ScalarFunctionArgMetadata::Lambda(params.as_slice()))
+                        }
+                        _ => Ok(ScalarFunctionArgMetadata::Value(arg.get_type(schema)?)),
                     })
-                    .collect::<Result<_>>()?;
+                    .collect::<Result<Vec<_>>>()?;
 
-                let captured_schema =
-                    DFSchema::new_with_metadata(captured_fields, Default::default())?;
-
-                let lambdas_schemas =
-                    func.lambdas_schemas_from_args(args, &captured_schema)?;
+                let lambdas_schemas = func.arguments_expr_schema(&args_metadata, schema)?;
 
                 let (arg_types, fields): (Vec<DataType>, Vec<Arc<Field>>) = std::iter::zip(args, lambdas_schemas)
                     // .map(|(e, schema)| e.to_field(schema).map(|(_, f)| f))

@@ -508,7 +508,7 @@ impl Expr {
         match self {
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
                 let mut lambdas_schemas =
-                    func.lambdas_schemas_from_args(args, schema)?.into_iter();
+                    func.arguments_schema_from_logical_args(args, schema)?.into_iter();
 
                 self.apply_children(|expr| f(expr, &lambdas_schemas.next().unwrap()))
             }
@@ -528,7 +528,7 @@ impl Expr {
         match self {
             Expr::ScalarFunction(ScalarFunction { ref func, ref args }) => {
                 let mut lambdas_schemas =
-                    func.lambdas_schemas_from_args(args, schema)?.into_iter();
+                    func.arguments_schema_from_logical_args(args, schema)?.into_iter();
 
                 self.map_children(|expr| f(expr, &lambdas_schemas.next().unwrap()))
             }

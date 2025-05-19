@@ -136,6 +136,18 @@ SELECT list_map([1,2,3,4,5], v -> v*2);
 [2, 4, 6, 8, 10]
 
 
+# expr simplifier
+query TT
+EXPLAIN SELECT v = v, list_map([1], v -> v = v) from t;
+----
+logical_plan
+01)Projection: Boolean(true) AS t.v = t.v, list_map(List([1]), (v) -> v IS NOT NULL OR Boolean(NULL)) AS list_map(make_array(Int64(1)),v -> v = v)
+02)--TableScan: t projection=[]
+physical_plan
+01)ProjectionExec: expr=[true as t.v = t.v, list_map([1], lambda((v) -> v@0 IS NOT NULL OR NULL)) as list_map(make_array(Int64(1)),v -> v = v)]
+02)--DataSourceExec: partitions=1, partition_sizes=[1]
+
+
 query error DataFusion error: Execution error: list_map expects a value follewed by a lambda, got \[\]
 select list_map();
 
@@ -144,3 +156,6 @@ select list_map(1, v -> v*2);
 
 query error DataFusion error: Execution error: list_map expects a value follewed by a lambda, got \[Lambda\(\["v"\]\), Value\(List\(Field \{ name: "item", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: \{\} \}\)\)\]
 select list_map(v -> v*2, [1, 2]);
+
+query error DataFusion error: Execution error: list_map 1º argument \(0\-indexed\), a lambda, supports up to 3 arguments, but got 2
+SELECT list_map([1, 2], (e, i, j) -> i) from t;
