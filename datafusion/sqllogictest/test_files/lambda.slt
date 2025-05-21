@@ -157,5 +157,5 @@ select list_map(1, v -> v*2);
 query error DataFusion error: Execution error: list_map expects a value follewed by a lambda, got \[Lambda\(\["v"\]\), Value\(List\(Field \{ name: "item", data_type: Int64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: \{\} \}\)\)\]
 select list_map(v -> v*2, [1, 2]);
 
-query error DataFusion error: Execution error: list_map 1º argument \(0\-indexed\), a lambda, supports up to 3 arguments, but got 2
+query error DataFusion error: Execution error: lambdas_schemas: list_map argument 1 \(0\-indexed\), a lambda, supports up to 2 arguments, but got 3
 SELECT list_map([1, 2], (e, i, j) -> i) from t;

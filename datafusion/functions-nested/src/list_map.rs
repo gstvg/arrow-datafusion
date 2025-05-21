@@ -26,7 +26,7 @@ use arrow::{
     buffer::OffsetBuffer,
     compute::take_record_batch,
     datatypes::{
-        ArrowNativeType, DataType, Field, Int32Type, Int64Type, Schema, UInt32Type,
+        ArrowNativeType, DataType, Field, Int32Type, Int64Type, Schema,
     },
 };
 use datafusion_common::{
@@ -164,7 +164,7 @@ impl ScalarUDFImpl for ListMap {
         // the implementation without the need for fixes. It also computes only the parameters requested
         let lambda_batch = merge_captures_with_lazy_args(
             adjusted_captures.as_ref(),
-            &lambda.fields, // ScalarUDF already merged the fields returned in lambdas_parameters with the parameters names definied in the lambda, so we don't need to
+            &lambda.params, // ScalarUDF already merged the fields returned in lambdas_parameters with the parameters names definied in the lambda, so we don't need to
             &[&values_param, &indices_param],
         )?;
 
@@ -223,7 +223,7 @@ impl ScalarUDFImpl for ListMap {
         let (field, index_type) = match list {
             DataType::List(field) => (field, DataType::Int32),
             DataType::LargeList(field) => (field, DataType::Int64),
-            DataType::FixedSizeList(field, _) => (field, DataType::UInt32),
+            DataType::FixedSizeList(field, _) => (field, DataType::Int32),
             _ => return exec_err!("expected list, got {list}"),
         };
 
@@ -242,11 +242,13 @@ impl ScalarUDFImpl for ListMap {
     }
 }
 
+/// [0, 2, 2, 5, 6] -> [0, 0, 2, 2, 2, 3]
 fn make_list_array_indices<T: ArrowPrimitiveType>(
     offsets: &OffsetBuffer<T::Native>,
 ) -> PrimitiveArray<T> {
-    let mut indices =
-        Vec::with_capacity(offsets.last().unwrap().as_usize() - offsets[0].as_usize());
+    let mut indices = Vec::with_capacity(
+        offsets.last().unwrap().as_usize() - offsets.first().unwrap().as_usize(),
+    );
 
     for (i, (&start, &end)) in std::iter::zip(&offsets[..], &offsets[1..]).enumerate() {
         indices.extend(repeat_n(
@@ -258,12 +260,14 @@ fn make_list_array_indices<T: ArrowPrimitiveType>(
     PrimitiveArray::new(indices.into(), None)
 }
 
+/// [0, 2, 2, 5, 6] -> [0, 1, 0, 1, 2, 0]
 fn make_list_element_indices<T: ArrowPrimitiveType>(
     offsets: &OffsetBuffer<T::Native>,
 ) -> PrimitiveArray<T> {
     let mut indices = vec![
         T::default_value();
-        offsets.last().unwrap().as_usize() - offsets[0].as_usize()
+        offsets.last().unwrap().as_usize()
+            - offsets.first().unwrap().as_usize()
     ];
 
     for (&start, &end) in std::iter::zip(&offsets[..], &offsets[1..]) {
@@ -275,30 +279,32 @@ fn make_list_element_indices<T: ArrowPrimitiveType>(
     PrimitiveArray::new(indices.into(), None)
 }
 
+/// (3, 2) -> [0, 0, 1, 1, 2, 2]
 fn make_fsl_array_indices(
     list_size: i32,
     array_len: usize,
-) -> PrimitiveArray<UInt32Type> {
+) -> PrimitiveArray<Int32Type> {
     let mut indices = vec![0; list_size as usize * array_len];
 
     for i in 0..array_len {
         for j in 0..list_size as usize {
-            indices[i + j] = i as u32;
+            indices[i + j] = i as i32;
         }
     }
 
     PrimitiveArray::new(indices.into(), None)
 }
 
+/// (3, 2) -> [0, 1, 0, 1, 0, 1]
 fn make_fsl_element_indices(
     list_size: i32,
     array_len: usize,
-) -> PrimitiveArray<UInt32Type> {
+) -> PrimitiveArray<Int32Type> {
     let mut indices = vec![0; list_size as usize * array_len];
 
     for i in 0..array_len {
         for j in 0..list_size as usize {
-            indices[i + j] = j as u32;
+            indices[i + j] = j as i32;
         }
     }
 

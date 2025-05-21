@@ -29,38 +29,7 @@ use arrow::{
 use datafusion_common::{internal_err, Result};
 use datafusion_expr::ColumnarValue;
 
-/// Represents the column at a given index in a RecordBatch
-///
-/// This is a physical expression that represents a column at a given index in an
-/// arrow [`Schema`] / [`RecordBatch`].
-///
-/// Unlike the [logical `Expr::Column`], this expression is always resolved by schema index,
-/// even though it does have a name. This is because the physical plan is always
-/// resolved to a specific schema and there is no concept of "relation"
-///
-/// # Example:
-///  If the schema is `a`, `b`, `c` the `Column` for `b` would be represented by
-///  index 1, since `b` is the second column in the schema.
-///
-/// ```
-/// # use datafusion_physical_expr::expressions::Column;
-/// # use arrow::datatypes::{DataType, Field, Schema};
-/// // Schema with columns a, b, c
-/// let schema = Schema::new(vec![
-///    Field::new("a", DataType::Int32, false),
-///    Field::new("b", DataType::Int32, false),
-///    Field::new("c", DataType::Int32, false),
-/// ]);
-///
-/// // reference to column b is index 1
-/// let column_b = Column::new_with_schema("b", &schema).unwrap();
-/// assert_eq!(column_b.index(), 1);
-///
-/// // reference to column c is index 2
-/// let column_c = Column::new_with_schema("c", &schema).unwrap();
-/// assert_eq!(column_c.index(), 2);
-/// ```
-/// [logical `Expr::Column`]: https://docs.rs/datafusion/latest/datafusion/logical_expr/enum.Expr.html#variant.Column
+/// Represents a lambda with the given parameters name and body
 #[derive(Debug, Eq, Clone)]
 pub struct LambdaExpr {
     params: Vec<String>,

@@ -252,7 +252,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
 
                         indices.sort_unstable();
 
-                        let fields =
+                        let params =
                             std::iter::zip(lambda.params(), lambda_params.unwrap())
                                 .map(|(name, param)| Arc::new(param.into_field(name)))
                                 .collect();
@@ -264,8 +264,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                         };
 
                         Ok(ScalarFunctionLambdaArg {
-                            params: lambda.params(),
-                            fields,
+                            params,
                             body: lambda.body().as_ref(),
                             captures,
                         })
@@ -505,5 +504,90 @@ impl PhysicalExprExt for Arc<dyn PhysicalExpr> {
         } else {
             self.apply_children(|e| f(e, schema))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion_common::{tree_node::TreeNodeRecursion, HashSet};
+    use datafusion_expr::tree_node::tests::{
+        int, list_int, list_list_int, list_map as list_map_logical,
+    };
+    use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
+
+    use crate::{create_physical_expr, create_physical_exprs};
+
+    use super::{lambdas_schemas_from_args, PhysicalExprExt};
+
+    fn test_lambdas_schemas_from_args() {
+        let schemas = lambdas_schemas_from_args(
+            &ScalarUDF::new_from_impl(ListMapFunc),
+            create_physical_exprs(&[], &list_list_int(), &Default::default()),
+            list_list_int().as_arrow(),
+        )
+        .unwrap();
+
+        assert_eq!(schemas, &[]);
+    }
+
+    fn list_map() -> Arc<dyn PhysicalExpr> {
+        create_physical_expr(&list_map_logical(), &list_list_int(), &Default::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn test_apply_with_schema() {
+        let mut steps = vec![];
+
+        list_map().apply_with_schema(list_list_int().as_arrow(), |node, schema| {
+            steps.push((node.to_string(), schema.clone()));
+
+            Ok(TreeNodeRecursion::Continue)
+        });
+
+        let expected = vec![
+            (
+                "list_map(v, (v) -> list_map(v, (v) -> (- v)))",
+                list_list_int().as_arrow(),
+            ),
+            ("(v) -> list_map(v, (v) -> (- v))", list_int().as_arrow()),
+            ("list_map(v, (v) -> (- v))", list_int().as_arrow()),
+            ("(v) -> (- v)", int().as_arrow()),
+            ("(- v)", int().as_arrow()),
+            ("v", int().as_arrow()),
+            ("v", int().as_arrow()),
+            ("v", int().as_arrow()),
+        ];
+
+        assert_eq!(steps, expected);
+    }
+
+    #[test]
+    fn test_apply_with_lambdas_params() {
+        let mut steps = vec![];
+
+        list_map().apply_with_lambdas_params(|node, params| {
+            steps.push((node.to_string(), params.clone()));
+
+            Ok(TreeNodeRecursion::Continue)
+        });
+
+        let expected = vec![
+            (
+                "list_map(v, (v) -> list_map(v, (v) -> (- v)))",
+                HashSet::from(["v"]),
+            ),
+            ("(v) -> list_map(v, (v) -> (- v))", HashSet::from(["v"])),
+            ("list_map(v, (v) -> (- v))", HashSet::from(["v"])),
+            ("(v) -> (- v)", HashSet::from(["v"])),
+            ("(- v)", HashSet::from(["v"])),
+            ("v", HashSet::from(["v"])),
+            ("v", HashSet::from(["v"])),
+            ("v", HashSet::from(["v"])),
+        ];
+
+        assert_eq!(steps, expected);
     }
 }

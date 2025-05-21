@@ -29,7 +29,7 @@ use crate::{utils, LogicalPlan, Projection, ScalarFunctionArgMetadata, Subquery,
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field};
 use datafusion_common::{
-    not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema, DataFusionError,
+    not_impl_err, plan_datafusion_err, plan_err, Column, DataFusionError,
     ExprSchema, Result, TableReference, Spans
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
@@ -456,28 +456,6 @@ impl ExprSchemable for Expr {
             }
             // Expr::Lambda(Lambda { params, body}) => body.to_field(schema),
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                // let captured_fields = self
-                //     .column_refs()
-                //     .iter()
-                //     .map(|column| {
-                //         let (data_type, nullable) =
-                //             schema.data_type_and_nullable(column)?;
-                //         let metadata = schema.metadata(column)?;
-
-                //         let field =
-                //             Field::new(column.name(), data_type.clone(), nullable)
-                //                 .with_metadata(metadata.clone());
-
-                //         Ok((column.relation.clone(), Arc::new(field)))
-                //     })
-                //     .collect::<Result<_>>()?;
-
-                // let captured_schema =
-                //     DFSchema::new_with_metadata(captured_fields, Default::default())?;
-
-                // let lambdas_schemas =
-                //     func.lambdas_schemas_from_args(args, &captured_schema)?;
-
                 let args_metadata = args.iter()
                     .map(|arg| match arg {
                         Expr::Lambda(Lambda { params, body: _ }) => {
