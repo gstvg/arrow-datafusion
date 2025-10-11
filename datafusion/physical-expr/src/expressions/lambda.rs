@@ -51,15 +51,17 @@ impl Hash for LambdaExpr {
 }
 
 impl LambdaExpr {
-    /// Create a new lambda expression with the given body and parameters
+    /// Create a new lambda expression with the given parameters and body
     pub fn new(params: Vec<String>, body: Arc<dyn PhysicalExpr>) -> Self {
         Self { params, body }
     }
 
+    /// Get the lambda's params names
     pub fn params(&self) -> &[String] {
         &self.params
     }
 
+    /// Get the lambda's body
     pub fn body(&self) -> &Arc<dyn PhysicalExpr> {
         &self.body
     }
@@ -67,7 +69,7 @@ impl LambdaExpr {
 
 impl std::fmt::Display for LambdaExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "lambda(({}) -> {})", self.params.join(", "), self.body)
+        write!(f, "({}) -> {}", self.params.join(", "), self.body)
     }
 }
 

@@ -104,9 +104,8 @@ pub use udaf::{
     SetMonotonicity, StatisticsArgs,
 };
 pub use udf::{
-    scalar_doc_sections, LambdaParameter, ReturnFieldArgs,
-    ScalarFunctionArgMetadata, ScalarFunctionArgs, ScalarFunctionLambdaArg, ScalarUDF,
-    ScalarUDFImpl, ValueOrLambda, ValueOrLambdaField
+    scalar_doc_sections, ReturnFieldArgs, ValueOrLambdaParameter, ScalarFunctionArgs,
+    ScalarFunctionLambdaArg, ScalarUDF, ScalarUDFImpl, ValueOrLambda, ValueOrLambdaField,
 };
 pub use udwf::{window_doc_sections, ReversedUDWF, WindowUDF, WindowUDFImpl};
 pub use window_frame::{WindowFrame, WindowFrameBound, WindowFrameUnits};

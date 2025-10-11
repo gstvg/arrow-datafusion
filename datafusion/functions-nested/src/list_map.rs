@@ -17,7 +17,6 @@
 
 //! [`ScalarUDFImpl`] definitions for list_map function.
 
-use arrow::datatypes::FieldRef;
 use arrow::{
     array::{
         Array, ArrayRef, ArrowPrimitiveType, AsArray, FixedSizeListArray, LargeListArray,
@@ -26,16 +25,13 @@ use arrow::{
     buffer::OffsetBuffer,
     compute::take_record_batch,
     datatypes::{
-        ArrowNativeType, DataType, Field, Int32Type, Int64Type, Schema,
+        ArrowNativeType, DataType, Field, FieldRef, Int32Type, Int64Type, Schema,
     },
 };
-use datafusion_common::{
-    exec_err, utils::take_function_args, DataFusionError, Result, ScalarValue,
-};
+use datafusion_common::{exec_err, internal_err, utils::take_function_args, Result};
 use datafusion_expr::{
-    ColumnarValue, Documentation, LambdaParameter, ScalarFunctionArgMetadata,
-    ScalarFunctionArgs, ScalarUDFImpl, Signature, ValueOrLambda, ValueOrLambdaField,
-    Volatility,
+    ColumnarValue, Documentation, ValueOrLambdaParameter, ScalarFunctionArgs,
+    ScalarUDFImpl, Signature, ValueOrLambda, ValueOrLambdaField, Volatility,
 };
 use datafusion_macros::user_doc;
 use std::iter::repeat_n;
@@ -100,24 +96,28 @@ impl ScalarUDFImpl for ListMap {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        unreachable!()
+        internal_err!("return_type called instead of return_field_from_args")
     }
 
     fn return_field_from_args(
         &self,
         args: datafusion_expr::ReturnFieldArgs,
     ) -> Result<Field> {
-        let args = args.lambda_args();
+        let args = args.to_lambda_args();
 
         let [ValueOrLambdaField::Value(list), ValueOrLambdaField::Lambda(lambda)] =
-            take_function_args(self.name(), args)?
+            take_function_args(self.name(), &args)?
         else {
-            return exec_err!("");
+            return exec_err!(
+                "{} expects a value follewed by a lambda, got {:?}",
+                self.name(),
+                args
+            );
         };
 
         // lambda is the resulting field of executing the lambda body
         // with the parameters returned in lambdas_parameters
-        let field = Arc::new(lambda.clone().with_name(Field::LIST_FIELD_DEFAULT_NAME));
+        let field = Arc::new((*lambda).clone().with_name(Field::LIST_FIELD_DEFAULT_NAME));
 
         let return_type = match list.data_type() {
             DataType::List(_) => DataType::List(field),
@@ -130,34 +130,35 @@ impl ScalarUDFImpl for ListMap {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let num_rows = args.number_rows;
+        // args.lambda_args allows the convenient match below, instead of inspecting both args.args and args.lambdas
+        let lambda_args = args.to_lambda_args();
+        let [list_value, lambda] = take_function_args(self.name(), &lambda_args)?;
 
-        // into_lambda_args allows the convenient match below
-        let args = args.into_lambda_args();
-
-        let [ValueOrLambda::Value(list_value), ValueOrLambda::Lambda(lambda)] =
-            take_function_args(self.name(), args)?
+        let (ValueOrLambda::Value(list_value), ValueOrLambda::Lambda(lambda)) =
+            (list_value, lambda)
         else {
-            unreachable!()
+            return exec_err!(
+                "{} expects a value follewed by a lambda, got {:?}",
+                self.name(),
+                &lambda_args
+            );
         };
 
-        // println!("captures={}\n", lambda.captures.schema_ref());
-
-        let list_array = list_value.to_array(num_rows)?;
-        let list_type = ListType::try_from(list_array.as_ref())?;
+        let list_array = list_value.to_array(args.number_rows)?;
 
         // if any column got captured, we need to adjust it to the values arrays,
         // duplicating values of list with mulitple values and removing values of empty lists
         // array_indices is not cheap so is important to avoid it when no column is captured
         let adjusted_captures = lambda
             .captures
-            .map(|captures| take_record_batch(&captures, &list_type.array_indices()))
+            .as_ref()
+            .map(|captures| take_record_batch(captures, &list_indices(&list_array)?))
             .transpose()?;
 
-        // pass closures to merge_captures_with_lazy_args so that it calls only the needed ones based on the number of arguments
+        // use closures and merge_captures_with_lazy_args so that it calls only the needed ones based on the number of arguments
         // avoiding unnecessary computations
-        let values_param = || Ok(Arc::clone(list_type.values()));
-        let indices_param = || Ok(list_type.elements_indices());
+        let values_param = || Ok(Arc::clone(list_values(&list_array)?));
+        let indices_param = || elements_indices(&list_array);
 
         // the order of the merged schema is an unspecified implementation detail that may change in the future,
         // using this function is the correct way to merge as it return the correct ordering and will change in sync
@@ -180,27 +181,36 @@ impl ScalarUDFImpl for ListMap {
             lambda.body.nullable(lambda_batch.schema_ref())?,
         ));
 
-        let mapped_list = match list_type {
-            ListType::List(list) => Arc::new(ListArray::new(
-                field,
-                list.offsets().clone(),
-                mapped_values,
-                list.nulls().cloned(),
-            )) as ArrayRef,
-            ListType::LargeList(large_list) => Arc::new(LargeListArray::new(
-                field,
-                large_list.offsets().clone(),
-                mapped_values,
-                large_list.nulls().cloned(),
-            )),
-            ListType::FixedSizeList(fixed_size_list) => {
-                Arc::new(FixedSizeListArray::new(
+        let mapped_list = match list_array.data_type() {
+            DataType::List(_) => {
+                let list = list_array.as_list();
+
+                Arc::new(ListArray::new(
                     field,
-                    fixed_size_list.value_length(),
+                    list.offsets().clone(),
                     mapped_values,
-                    fixed_size_list.nulls().cloned(),
+                    list.nulls().cloned(),
+                )) as ArrayRef
+            }
+            DataType::LargeList(_) => {
+                let large_list = list_array.as_list();
+
+                Arc::new(LargeListArray::new(
+                    field,
+                    large_list.offsets().clone(),
+                    mapped_values,
+                    large_list.nulls().cloned(),
                 ))
             }
+            DataType::FixedSizeList(_, value_length) => {
+                Arc::new(FixedSizeListArray::new(
+                    field,
+                    *value_length,
+                    mapped_values,
+                    list_array.as_fixed_size_list().nulls().cloned(),
+                ))
+            }
+            other => exec_err!("expected list, got {other}")?,
         };
 
         Ok(ColumnarValue::Array(mapped_list))
@@ -208,9 +218,9 @@ impl ScalarUDFImpl for ListMap {
 
     fn lambdas_parameters(
         &self,
-        args: &[ScalarFunctionArgMetadata],
-    ) -> Result<Vec<Option<Vec<LambdaParameter>>>> {
-        let [ScalarFunctionArgMetadata::Value(list), ScalarFunctionArgMetadata::Lambda(_)] =
+        args: &[ValueOrLambdaParameter],
+    ) -> Result<Vec<Option<Vec<Field>>>> {
+        let [ValueOrLambdaParameter::Value(list), ValueOrLambdaParameter::Lambda(_)] =
             args
         else {
             return exec_err!(
@@ -220,7 +230,7 @@ impl ScalarUDFImpl for ListMap {
             );
         };
 
-        let (field, index_type) = match list {
+        let (field, index_type) = match list.data_type() {
             DataType::List(field) => (field, DataType::Int32),
             DataType::LargeList(field) => (field, DataType::Int64),
             DataType::FixedSizeList(field, _) => (field, DataType::Int32),
@@ -230,9 +240,9 @@ impl ScalarUDFImpl for ListMap {
         // we don't need to omit the index in the case the lambda don't specify, e.g. list_map([], v -> v*2),
         // nor check whether the lambda contains more than two parameters, e.g. list_map([], (v, i, j) -> v+i+j),
         // as datafusion will do that for us
-        let value = LambdaParameter::new(field.data_type().clone(), field.is_nullable())
+        let value = Field::new("value", field.data_type().clone(), field.is_nullable())
             .with_metadata(field.metadata().clone());
-        let index = LambdaParameter::new(index_type, false);
+        let index = Field::new("index", index_type, false);
 
         Ok(vec![None, Some(vec![value, index])])
     }
@@ -280,10 +290,7 @@ fn make_list_element_indices<T: ArrowPrimitiveType>(
 }
 
 /// (3, 2) -> [0, 0, 1, 1, 2, 2]
-fn make_fsl_array_indices(
-    list_size: i32,
-    array_len: usize,
-) -> PrimitiveArray<Int32Type> {
+fn make_fsl_array_indices(list_size: i32, array_len: usize) -> PrimitiveArray<Int32Type> {
     let mut indices = vec![0; list_size as usize * array_len];
 
     for i in 0..array_len {
@@ -410,90 +417,52 @@ impl LazyArgument for &dyn Fn() -> Result<ArrayRef> {
     }
 }
 
-enum ListType<'a> {
-    List(&'a ListArray),
-    LargeList(&'a LargeListArray),
-    FixedSizeList(&'a FixedSizeListArray),
-}
-
-impl<'a> TryFrom<&'a dyn Array> for ListType<'a> {
-    type Error = DataFusionError;
-
-    fn try_from(array: &'a dyn Array) -> std::result::Result<Self, Self::Error> {
-        match array.data_type() {
-            DataType::List(_) => Ok(ListType::List(array.as_list())),
-            DataType::LargeList(_) => Ok(ListType::LargeList(array.as_list())),
-            DataType::FixedSizeList(_, _) => {
-                Ok(ListType::FixedSizeList(array.as_fixed_size_list()))
-            }
-            data_type => exec_err!("expected list, got {data_type}"),
-        }
+fn list_values(array: &dyn Array) -> Result<&ArrayRef> {
+    match array.data_type() {
+        DataType::List(_) => Ok(array.as_list::<i32>().values()),
+        DataType::LargeList(_) => Ok(array.as_list::<i64>().values()),
+        DataType::FixedSizeList(_, _) => Ok(array.as_fixed_size_list().values()),
+        other => exec_err!("expected list, got {other}"),
     }
 }
 
-impl<'a> TryFrom<&'a ScalarValue> for ListType<'a> {
-    type Error = DataFusionError;
+fn list_indices(array: &dyn Array) -> Result<ArrayRef> {
+    match array.data_type() {
+        DataType::List(_) => Ok(Arc::new(make_list_array_indices::<Int32Type>(
+            array.as_list().offsets(),
+        ))),
+        DataType::LargeList(_) => Ok(Arc::new(make_list_array_indices::<Int64Type>(
+            array.as_list().offsets(),
+        ))),
+        DataType::FixedSizeList(_, _) => {
+            let fixed_size_list = array.as_fixed_size_list();
 
-    fn try_from(value: &'a ScalarValue) -> std::result::Result<Self, Self::Error> {
-        match value {
-            ScalarValue::List(list) => Ok(ListType::List(list)),
-            ScalarValue::LargeList(list) => Ok(ListType::LargeList(list)),
-            ScalarValue::FixedSizeList(list) => Ok(ListType::FixedSizeList(list)),
-            _ => exec_err!("expected list, got {}", value.data_type()),
-        }
-    }
-}
-
-impl<'a> TryFrom<&'a ColumnarValue> for ListType<'a> {
-    type Error = DataFusionError;
-
-    fn try_from(value: &'a ColumnarValue) -> std::result::Result<Self, Self::Error> {
-        match value {
-            ColumnarValue::Array(array) => array.as_ref().try_into(),
-            ColumnarValue::Scalar(scalar_value) => scalar_value.try_into(),
-        }
-    }
-}
-
-impl ListType<'_> {
-    fn values(&self) -> &ArrayRef {
-        match self {
-            ListType::List(list) => list.values(),
-            ListType::LargeList(large_list) => large_list.values(),
-            ListType::FixedSizeList(fixed_size_list) => fixed_size_list.values(),
-        }
-    }
-
-    fn array_indices(&self) -> ArrayRef {
-        match self {
-            ListType::List(list) => {
-                Arc::new(make_list_array_indices::<Int32Type>(list.offsets()))
-            }
-            ListType::LargeList(large_list) => {
-                Arc::new(make_list_array_indices::<Int64Type>(large_list.offsets()))
-            }
-            ListType::FixedSizeList(fixed_size_list) => Arc::new(make_fsl_array_indices(
+            Ok(Arc::new(make_fsl_array_indices(
                 fixed_size_list.value_length(),
                 fixed_size_list.len(),
-            )),
+            )))
         }
+        other => exec_err!("expected list, got {other}"),
     }
+}
 
-    fn elements_indices(&self) -> ArrayRef {
-        match self {
-            ListType::List(list) => {
-                Arc::new(make_list_element_indices::<Int32Type>(list.offsets()))
-            }
-            ListType::LargeList(large_list) => {
-                Arc::new(make_list_element_indices::<Int64Type>(large_list.offsets()))
-            }
-            ListType::FixedSizeList(fixed_size_list) => {
-                Arc::new(make_fsl_element_indices(
-                    fixed_size_list.value_length(),
-                    fixed_size_list.len(),
-                ))
-            }
+fn elements_indices(array: &dyn Array) -> Result<ArrayRef> {
+    match array.data_type() {
+        DataType::List(_) => Ok(Arc::new(make_list_element_indices::<Int32Type>(
+            array.as_list::<i32>().offsets(),
+        ))),
+        DataType::LargeList(_) => Ok(Arc::new(make_list_element_indices::<Int64Type>(
+            array.as_list::<i64>().offsets(),
+        ))),
+        DataType::FixedSizeList(_, _) => {
+            let fixed_size_list = array.as_fixed_size_list();
+
+            Ok(Arc::new(make_fsl_element_indices(
+                fixed_size_list.value_length(),
+                fixed_size_list.len(),
+            )))
         }
+        other => exec_err!("expected list, got {other}"),
     }
 }
 

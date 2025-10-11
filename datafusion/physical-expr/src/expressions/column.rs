@@ -67,7 +67,7 @@ pub struct Column {
     /// The name of the column (used for debugging and display purposes)
     name: String,
     /// The index of the column in its schema.
-    /// Within lambdas body this refer to the lambda scoped schema, and not the outer schema.
+    /// Within a lambda body, this refer to the lambda scoped schema, not the plan schema.
     index: usize,
 }
 

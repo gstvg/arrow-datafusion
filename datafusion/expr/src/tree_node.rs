@@ -17,18 +17,21 @@
 
 //! Tree node implementation for Logical Expressions
 
+use crate::{
+    expr::{
+        AggregateFunction, AggregateFunctionParams, Alias, Between, BinaryExpr, Case,
+        Cast, GroupingSet, InList, InSubquery, Lambda, Like, Placeholder, ScalarFunction,
+        TryCast, Unnest, WindowFunction, WindowFunctionParams,
+    },
+    Expr, ExprFunctionExt,
+};
+use datafusion_common::{
+    tree_node::{
+        Transformed, TreeNode, TreeNodeContainer, TreeNodeRecursion, TreeNodeRefContainer,
+    },
+    DFSchema, Result,
+};
 use std::collections::HashSet;
-
-use crate::expr::{
-    AggregateFunction, AggregateFunctionParams, Alias, Between, BinaryExpr, Case, Cast,
-    GroupingSet, InList, InSubquery, Lambda, Like, Placeholder, ScalarFunction, TryCast,
-    Unnest, WindowFunction, WindowFunctionParams,
-};
-use crate::{Expr, ExprFunctionExt};
-use datafusion_common::tree_node::{
-    Transformed, TreeNode, TreeNodeContainer, TreeNodeRecursion, TreeNodeRefContainer,
-};
-use datafusion_common::{DFSchema, Result};
 
 /// Implementation of the [`TreeNode`] trait
 ///
@@ -391,7 +394,7 @@ impl Expr {
 
     pub fn apply_with_lambdas_params<
         'n,
-        F: FnMut(&'n Self, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+        F: FnMut(&'n Self, &HashSet<&'n str>) -> Result<TreeNodeRecursion>,
     >(
         &'n self,
         mut f: F,
@@ -399,10 +402,10 @@ impl Expr {
         #[cfg_attr(feature = "recursive_protection", recursive::recursive)]
         fn apply_with_lambdas_params_impl<
             'n,
-            F: FnMut(&'n Expr, &HashSet<&str>) -> Result<TreeNodeRecursion>,
+            F: FnMut(&'n Expr, &HashSet<&'n str>) -> Result<TreeNodeRecursion>,
         >(
             node: &'n Expr,
-            args: &HashSet<&str>,
+            args: &HashSet<&'n str>,
             f: &mut F,
         ) -> Result<TreeNodeRecursion> {
             match node {
@@ -441,20 +444,22 @@ pub trait ExprWithLambdasRewriter: Sized {
     }
 }
 
+// helpers used in udf.rs
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
     use super::ExprWithLambdasRewriter;
     use crate::{
-        col, expr::Lambda, Expr, LambdaParameter, ScalarFunctionArgMetadata, ScalarUDF,
-        ScalarUDFImpl,
+        col, expr::Lambda, Expr, ValueOrLambdaParameter, ScalarUDF, ScalarUDFImpl,
     };
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion_common::{
         tree_node::{Transformed, TreeNodeRecursion},
-        DFSchema, HashSet, Result,
+        DFSchema, Result,
     };
+    use datafusion_expr_common::signature::{Signature, Volatility};
+    use std::collections::HashSet;
 
-    pub fn list_list_int() -> DFSchema {
+    pub(crate) fn list_list_int() -> DFSchema {
         DFSchema::try_from(Schema::new(vec![Field::new(
             "v",
             DataType::new_list(DataType::new_list(DataType::Int32, false), false),
@@ -463,7 +468,7 @@ pub mod tests {
         .unwrap()
     }
 
-    pub fn list_int() -> DFSchema {
+    pub(crate) fn list_int() -> DFSchema {
         DFSchema::try_from(Schema::new(vec![Field::new(
             "v",
             DataType::new_list(DataType::Int32, false),
@@ -472,30 +477,45 @@ pub mod tests {
         .unwrap()
     }
 
-    pub fn int() -> DFSchema {
+    fn int() -> DFSchema {
         DFSchema::try_from(Schema::new(vec![Field::new("v", DataType::Int32, false)]))
             .unwrap()
     }
 
-    // list_map(v, |v| -> list_map(v, |v| -> -v))
-    pub fn list_map() -> Expr {
-        ScalarUDF::new_from_impl(ListMapFunc).call(vec![
+    pub(crate) fn list_map_udf() -> ScalarUDF {
+        ScalarUDF::new_from_impl(ListMapFunc::new())
+    }
+
+    pub(crate) fn args() -> Vec<Expr> {
+        vec![
             col("v"),
-            Expr::Lambda(Lambda {
-                params: vec!["v".into()],
-                body: Box::new(ScalarUDF::new_from_impl(ListMapFunc).call(vec![
+            Expr::Lambda(Lambda::new(
+                vec!["v".into()],
+                list_map_udf().call(vec![
                     col("v"),
-                    Expr::Lambda(Lambda {
-                        params: vec!["v".into()],
-                        body: Box::new(-col("v")),
-                    }),
-                ])),
-            }),
-        ])
+                    Expr::Lambda(Lambda::new(vec!["v".into()], -col("v"))),
+                ]),
+            )),
+        ]
+    }
+
+    // list_map(v, |v| -> list_map(v, |v| -> -v))
+    fn list_map() -> Expr {
+        list_map_udf().call(args())
     }
 
     #[derive(Debug)]
-    pub struct ListMapFunc;
+    pub(crate) struct ListMapFunc {
+        signature: Signature,
+    }
+
+    impl ListMapFunc {
+        pub fn new() -> Self {
+            Self {
+                signature: Signature::any(2, Volatility::Immutable),
+            }
+        }
+    }
 
     impl ScalarUDFImpl for ListMapFunc {
         fn as_any(&self) -> &dyn std::any::Any {
@@ -503,11 +523,11 @@ pub mod tests {
         }
 
         fn name(&self) -> &str {
-            "list_map"
+            "list_transform"
         }
 
-        fn signature(&self) -> &datafusion_expr_common::signature::Signature {
-            unimplemented!()
+        fn signature(&self) -> &Signature {
+            &self.signature
         }
 
         fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
@@ -516,15 +536,20 @@ pub mod tests {
 
         fn lambdas_parameters(
             &self,
-            args: &[ScalarFunctionArgMetadata],
-        ) -> Result<Vec<Option<Vec<LambdaParameter>>>> {
-            let ScalarFunctionArgMetadata::Value(DataType::List(field)) = &args[0] else {
+            args: &[ValueOrLambdaParameter],
+        ) -> Result<Vec<Option<Vec<Field>>>> {
+            let ValueOrLambdaParameter::Value(value_field) = &args[0] else {
+                unimplemented!()
+            };
+            
+            let DataType::List(field) = value_field.data_type() else {
                 unimplemented!()
             };
 
             Ok(vec![
                 None,
-                Some(vec![LambdaParameter::new(
+                Some(vec![Field::new(
+                    "",
                     field.data_type().clone(),
                     field.is_nullable(),
                 )]),
@@ -573,7 +598,8 @@ pub mod tests {
                 "f_up list_map(v, (v) -> list_map(v, (v) -> (- v)))",
                 list_list_int(),
             ),
-        ];
+        ]
+        .map(|(a, b)| (String::from(a), b));
 
         assert_eq!(rewriter.steps, expected)
     }
@@ -585,14 +611,13 @@ pub mod tests {
 
     impl ExprWithLambdasRewriter for OkRewriter {
         fn f_down(&mut self, node: Expr, schema: &DFSchema) -> Result<Transformed<Expr>> {
-            self.steps
-                .push((format!("f_down {}", node), schema.clone()));
+            self.steps.push((format!("f_down {node}"), schema.clone()));
 
             Ok(Transformed::no(node))
         }
 
         fn f_up(&mut self, node: Expr, schema: &DFSchema) -> Result<Transformed<Expr>> {
-            self.steps.push((format!("f_up {}", node), schema.clone()));
+            self.steps.push((format!("f_up {node}"), schema.clone()));
 
             Ok(Transformed::no(node))
         }
@@ -602,40 +627,48 @@ pub mod tests {
     fn test_transform_up_with_lambdas_params() {
         let mut steps = vec![];
 
-        list_map().transform_up_with_lambdas_params(|node, params| {
-            steps.push((node.to_string(), params.clone()));
+        list_map()
+            .transform_up_with_lambdas_params(|node, params| {
+                steps.push((node.to_string(), params.clone()));
 
-            Ok(Transformed::no(node))
-        });
+                Ok(Transformed::no(node))
+            })
+            .unwrap();
 
-        let expected = vec![
-            ("v", HashSet::from(["v"])),
-            ("v", HashSet::from(["v"])),
-            ("v", HashSet::from(["v"])),
-            ("(- v)", HashSet::from(["v"])),
-            ("(v) -> (- v)", HashSet::from(["v"])),
-            ("list_map(v, (v) -> (- v))", HashSet::from(["v"])),
-            ("(v) -> list_map(v, (v) -> (- v))", HashSet::from(["v"])),
+        let lambdas_params = &HashSet::from([String::from("v")]);
+
+        let expected = [
+            ("v", lambdas_params),
+            ("v", lambdas_params),
+            ("v", lambdas_params),
+            ("(- v)", lambdas_params),
+            ("(v) -> (- v)", lambdas_params),
+            ("list_map(v, (v) -> (- v))", lambdas_params),
+            ("(v) -> list_map(v, (v) -> (- v))", lambdas_params),
             (
                 "list_map(v, (v) -> list_map(v, (v) -> (- v)))",
-                HashSet::from(["v"]),
+                lambdas_params,
             ),
-        ];
+        ]
+        .map(|(a, b)| (String::from(a), b.clone()));
 
         assert_eq!(steps, expected);
     }
 
     #[test]
     fn test_apply_with_lambdas_params() {
+        let list_map = list_map();
         let mut steps = vec![];
 
-        list_map().apply_with_lambdas_params(|node, params| {
-            steps.push((node.to_string(), params.clone()));
+        list_map
+            .apply_with_lambdas_params(|node, params| {
+                steps.push((node.to_string(), params.clone()));
 
-            Ok(TreeNodeRecursion::Continue)
-        });
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
 
-        let expected = vec![
+        let expected = [
             ("v", HashSet::from(["v"])),
             ("v", HashSet::from(["v"])),
             ("v", HashSet::from(["v"])),
@@ -647,7 +680,8 @@ pub mod tests {
                 "list_map(v, (v) -> list_map(v, (v) -> (- v)))",
                 HashSet::from(["v"]),
             ),
-        ];
+        ]
+        .map(|(a, b)| (String::from(a), b));
 
         assert_eq!(steps, expected);
     }

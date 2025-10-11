@@ -32,7 +32,6 @@ use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use std::any::Any;
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -291,11 +290,11 @@ impl ScalarUDF {
     /// Variation of arguments_from_logical_args that works with arrow Schema's and ScalarFunctionArgMetadata instead
     pub(crate) fn arguments_expr_schema<'a>(
         &self,
-        args: &[ScalarFunctionArgMetadata],
+        args: &[Expr],
         schema: &'a dyn ExprSchema,
     ) -> Result<Vec<impl ExprSchema + 'a>> {
         self.arguments_scope_with(
-            args,
+            &lambda_parameters(args, schema)?,
             LambdaSchema {
                 params: Default::default(),
                 outer_schema: schema,
@@ -314,7 +313,7 @@ impl ScalarUDF {
     /// should contains the captured columns indexes in schema
     pub fn arguments_arrow_schema<'a>(
         &self,
-        args: &[ScalarFunctionArgMetadata],
+        args: &[ValueOrLambdaParameter],
         captures: &[HashSet<usize>],
         schema: &'a Schema,
     ) -> Result<Vec<Cow<'a, Schema>>> {
@@ -354,16 +353,6 @@ impl ScalarUDF {
         args: &[Expr],
         schema: &'a DFSchema,
     ) -> Result<Vec<Cow<'a, DFSchema>>> {
-        let args_metadata = args
-            .iter()
-            .map(|e| match e {
-                Expr::Lambda(Lambda { params, body: _ }) => {
-                    Ok(ScalarFunctionArgMetadata::Lambda(params.as_slice()))
-                }
-                _ => Ok(ScalarFunctionArgMetadata::Value(e.get_type(schema)?)),
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         let captures = args
             .iter()
             .map(|expr| match expr {
@@ -375,11 +364,7 @@ impl ScalarUDF {
                             if column.relation.is_some()
                                 || !lambdas_params.contains(column.name())
                             {
-                                columns.insert(
-                                    schema.index_of_column(column).inspect_err(
-                                        |err| println!("{err} {lambdas_params:?}"),
-                                    )?,
-                                );
+                                columns.insert(schema.index_of_column(column)?);
                             }
                         }
 
@@ -392,31 +377,35 @@ impl ScalarUDF {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        self.arguments_scope_with(&args_metadata, Cow::Borrowed(schema), |i, fields| {
-            // the order of the merged schema must be kept in sync with merge_captures_with_args
-            let mut df_schema =
-                DFSchema::from_unqualified_fields(fields, Default::default())?;
+        self.arguments_scope_with(
+            &lambda_parameters(args, schema)?,
+            Cow::Borrowed(schema),
+            |i, fields| {
+                // the order of the merged schema must be kept in sync with merge_captures_with_args
+                let mut df_schema =
+                    DFSchema::from_unqualified_fields(fields, Default::default())?;
 
-            let mut captures = captures[i].iter().copied().collect::<Vec<_>>();
+                let mut captures = captures[i].iter().copied().collect::<Vec<_>>();
 
-            captures.sort_unstable();
+                captures.sort_unstable();
 
-            let field_qualifiers = captures
-                .iter()
-                .map(|i| schema.field_qualifiers()[*i].clone())
-                .collect();
+                let field_qualifiers = captures
+                    .iter()
+                    .map(|i| schema.field_qualifiers()[*i].clone())
+                    .collect();
 
-            let schema = schema.as_arrow().project(&captures)?;
+                let schema = schema.as_arrow().project(&captures)?;
 
-            df_schema.merge(&DFSchema::from_field_specific_qualified_schema(
-                field_qualifiers,
-                &Arc::new(schema),
-            )?);
+                df_schema.merge(&DFSchema::from_field_specific_qualified_schema(
+                    field_qualifiers,
+                    &Arc::new(schema),
+                )?);
 
-            df_schema.check_names().unwrap();
+                df_schema.check_names().unwrap();
 
-            Ok(Cow::Owned(df_schema))
-        })
+                Ok(Cow::Owned(df_schema))
+            },
+        )
     }
 
     /// Return a vec with a value for each argument in args that, if it's a value, it's a clone of base_scope,
@@ -424,7 +413,7 @@ impl ScalarUDF {
     /// updated with names from metadata
     fn arguments_scope_with<T: Clone>(
         &self,
-        args: &[ScalarFunctionArgMetadata],
+        args: &[ValueOrLambdaParameter],
         base_scope: T,
         merge: impl Fn(usize, Fields) -> Result<T>,
     ) -> Result<Vec<T>> {
@@ -442,16 +431,16 @@ impl ScalarUDF {
         std::iter::zip(args, parameters)
             .enumerate()
             .map(|(i, (arg, parameters))| match (arg, parameters) {
-                (ScalarFunctionArgMetadata::Value(_), None) => Ok(base_scope.clone()),
-                (ScalarFunctionArgMetadata::Value(_), Some(_)) => exec_err!("lambdas_schemas: {} argument {} (0-indexed) is a value but lambdas_parameters result treat it as a lambda", self.name(), i),
-                (ScalarFunctionArgMetadata::Lambda(_), None) => exec_err!("lambdas_schemas: {} argument {} (0-indexed) is a lambda but lambdas_parameters result treat it as a value", self.name(), i),
-                (ScalarFunctionArgMetadata::Lambda(names), Some(args)) => {
+                (ValueOrLambdaParameter::Value(_), None) => Ok(base_scope.clone()),
+                (ValueOrLambdaParameter::Value(_), Some(_)) => exec_err!("lambdas_schemas: {} argument {} (0-indexed) is a value but lambdas_parameters result treat it as a lambda", self.name(), i),
+                (ValueOrLambdaParameter::Lambda(_), None) => exec_err!("lambdas_schemas: {} argument {} (0-indexed) is a lambda but lambdas_parameters result treat it as a value", self.name(), i),
+                (ValueOrLambdaParameter::Lambda(names), Some(args)) => {
                     if names.len() > args.len() {
                         return exec_err!("lambdas_schemas: {} argument {} (0-indexed), a lambda, supports up to {} arguments, but got {}", self.name(), i, args.len(), names.len())
                     }
 
                     let fields = std::iter::zip(*names, args)
-                        .map(|(name, arg)| arg.into_field(name))
+                        .map(|(name, arg)| arg.with_name(name))
                         .collect::<Fields>();
 
                     merge(i, fields)
@@ -481,9 +470,9 @@ impl ExprSchema for LambdaSchema<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub enum ScalarFunctionArgMetadata<'a> {
-    /// A columnar value with the given data type
-    Value(DataType),
+pub enum ValueOrLambdaParameter<'a> {
+    /// A columnar value with the given field
+    Value(Field),
     /// A lambda with the given parameters names
     Lambda(&'a [String]),
 }
@@ -517,27 +506,28 @@ pub struct ScalarFunctionArgs<'a, 'b, 'c> {
 }
 
 /// A lambda argument to a ScalarFunction
+#[derive(Clone, Debug)]
 pub struct ScalarFunctionLambdaArg<'a> {
     /// The parameters defined in this lambda
-    /// 
+    ///
     /// For example, for `list_transform([2], v -> -v)`,
     /// this will be `vec![Field::new("v", DataType::Int32, true)]`
     pub params: Vec<FieldRef>,
     /// The body of the lambda
-    /// 
+    ///
     /// For example, for `list_transform([2], v -> -v)`,
     /// this will be the physical expression of `-v`
     pub body: &'a dyn PhysicalExpr,
     /// The captured columns inside this lambda body, if any
-    /// 
+    ///
     /// For example, for `list_transform([2], v -> v + a + b)`,
     /// this will be a `RecordBatch` with two columns, `a` and `b`
     pub captures: Option<RecordBatch>,
 }
 
-impl<'c> ScalarFunctionArgs<'_, '_, 'c> {
-    pub fn into_lambda_args(self) -> Vec<ValueOrLambda<'c>> {
-        std::iter::zip(self.args, self.lambdas)
+impl ScalarFunctionArgs<'_, '_, '_> {
+    pub fn to_lambda_args(&self) -> Vec<ValueOrLambda> {
+        std::iter::zip(&self.args, &self.lambdas)
             .map(|(arg, lambda)| match lambda {
                 Some(lambda) => ValueOrLambda::Lambda(lambda),
                 None => ValueOrLambda::Value(arg),
@@ -547,9 +537,10 @@ impl<'c> ScalarFunctionArgs<'_, '_, 'c> {
 }
 
 // An argument to a ScalarUDF that supports lambdas
+#[derive(Debug)]
 pub enum ValueOrLambda<'a> {
-    Value(ColumnarValue),
-    Lambda(ScalarFunctionLambdaArg<'a>),
+    Value(&'a ColumnarValue),
+    Lambda(&'a ScalarFunctionLambdaArg<'a>),
 }
 
 /// Information about arguments passed to the function
@@ -562,12 +553,12 @@ pub enum ValueOrLambda<'a> {
 #[derive(Debug)]
 pub struct ReturnFieldArgs<'a> {
     /// The data types of the arguments to the function
-    /// 
+    ///
     /// If argument `i` to the function is a lambda, it will be the field returned by the
     /// lambda when executed with the arguments returned from `ScalarUDFImpl::lambdas_parameters`
-    /// 
+    ///
     /// For example, with `list_transform([1], v -> v == 5)`
-    /// this field will be `[Field::new("", DataType::Int32, false), Field::new("", DataType::Boolean, false)]`
+    /// this field will be `[Field::new("", DataType::List(DataType::Int32), false), Field::new("", DataType::Boolean, false)]`
     pub arg_fields: &'a [Field],
     /// Is argument `i` to the function a scalar (constant)?
     ///
@@ -577,19 +568,25 @@ pub struct ReturnFieldArgs<'a> {
     /// this field will be `[None, Some(ScalarValue::Int32(Some(5)))]`
     pub scalar_arguments: &'a [Option<&'a ScalarValue>],
     /// Is argument `i` to the function a lambda?
-    /// 
+    ///
     /// For example, with `list_transform([1], v -> v == 5)`
     /// this field will be `[false, true]`
     pub lambdas: &'a [bool],
 }
 
+/// A tagged Field indicating whether it correspond to a value or a lambda argument
+#[derive(Debug)]
 pub enum ValueOrLambdaField<'a> {
+    /// The Field of a ColumnarValue argument
     Value(&'a Field),
+    /// The Field of the return of the lambda body when evaluated with the parameters from ScalarUDF::lambda_parameters
     Lambda(&'a Field),
 }
 
 impl<'a> ReturnFieldArgs<'a> {
-    pub fn lambda_args(&self) -> Vec<ValueOrLambdaField<'a>> {
+    /// Based on self.lambdas, encodes self.arg_fields to tagged enums 
+    /// indicating whether it correspond to a value or a lambda argument
+    pub fn to_lambda_args(&self) -> Vec<ValueOrLambdaField<'a>> {
         std::iter::zip(self.arg_fields, self.lambdas)
             .map(|(field, is_lambda)| {
                 if *is_lambda {
@@ -992,44 +989,10 @@ pub trait ScalarUDFImpl: Debug + Send + Sync {
     /// Returns the parameters that any lambda supports
     fn lambdas_parameters(
         &self,
-        args: &[ScalarFunctionArgMetadata],
-    ) -> Result<Vec<Option<Vec<LambdaParameter>>>> {
+        args: &[ValueOrLambdaParameter],
+    ) -> Result<Vec<Option<Vec<Field>>>> {
         // not_impl_err!("lambda_schemas is not implemented for {self:?}")
         Ok(vec![None; args.len()])
-    }
-}
-
-/// Describes a single parameter that a lambda supports
-#[derive(Debug, Clone)]
-pub struct LambdaParameter {
-    data_type: DataType,
-    nullable: bool,
-    /// A map of key-value pairs containing additional custom meta data.
-    metadata: HashMap<String, String>,
-}
-
-impl LambdaParameter {
-    /// Creates a new lambda parameter with the given type and nullability
-    pub fn new(data_type: DataType, nullable: bool) -> Self {
-        Self {
-            data_type,
-            nullable,
-            metadata: Default::default(),
-        }
-    }
-
-    /// Sets the metadata of this `LambdaParameter` to be `metadata` and returns self
-    pub fn with_metadata(self, metadata: HashMap<String, String>) -> Self {
-        Self {
-            data_type: self.data_type,
-            nullable: self.nullable,
-            metadata,
-        }
-    }
-
-    /// Converts into a `Field` with the given `name`
-    pub fn into_field(self, name: impl Into<String>) -> Field {
-        Field::new(name, self.data_type, self.nullable).with_metadata(self.metadata)
     }
 }
 
@@ -1261,44 +1224,57 @@ The following regular expression functions are supported:"#,
     };
 }
 
+fn lambda_parameters<'a>(
+    args: &'a [Expr],
+    schema: &dyn ExprSchema,
+) -> Result<Vec<ValueOrLambdaParameter<'a>>> {
+    args.iter()
+        .map(|e| match e {
+            Expr::Lambda(Lambda { params, body: _ }) => {
+                Ok(ValueOrLambdaParameter::Lambda(params.as_slice()))
+            }
+            _ => Ok(ValueOrLambdaParameter::Value(Arc::unwrap_or_clone(e.to_field(schema)?.1))),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
-    use arrow::datatypes::{DataType, Fields};
+    use arrow::datatypes::Fields;
     use datafusion_common::HashSet;
 
     use crate::{
-        tree_node::tests::{list_int, list_list_int, ListMapFunc},
-        udf::LambdaSchema,
+        tree_node::tests::{args, list_int, list_list_int, list_map_udf},
+        udf::{lambda_parameters, LambdaSchema}
     };
-
-    use super::{ScalarFunctionArgMetadata, ScalarUDF};
-
-    fn args() -> Vec<ScalarFunctionArgMetadata<'static>> {
-        vec![
-            ScalarFunctionArgMetadata::Value(DataType::new_list(DataType::Int32, false)),
-            ScalarFunctionArgMetadata::Lambda(vec!["v".into()].leak()),
-        ]
-    }
 
     #[test]
     fn test_arguments_expr_schema() {
-        let schemas = ScalarUDF::new_from_impl(ListMapFunc)
-            .arguments_expr_schema(&args(), &list_list_int())
+        let args = args();
+        let schema = list_list_int();
+
+        let schemas = list_map_udf()
+            .arguments_expr_schema(&args, &schema)
             .unwrap()
             .into_iter()
             .map(|s| format!("{s:?}"))
             .collect::<Vec<_>>();
 
+        let mut lambdas_parameters = list_map_udf().inner().lambdas_parameters(
+            &lambda_parameters(&args, &schema).unwrap(),
+        )
+        .unwrap();
+
         assert_eq!(
             schemas,
             &[
-                format!("{}", &list_list_int(),),
+                format!("{}", &list_list_int()),
                 format!(
-                    "{}",
+                    "{:?}",
                     LambdaSchema {
-                        params: Fields::from([]),
+                        params: Fields::from(lambdas_parameters[0].take().unwrap()),
                         outer_schema: &list_list_int()
                     }
                 ),
@@ -1311,9 +1287,9 @@ mod tests {
         let list_int = list_int();
         let list_list_int = list_list_int();
 
-        let schemas = ScalarUDF::new_from_impl(ListMapFunc)
+        let schemas = list_map_udf()
             .arguments_arrow_schema(
-                &args(),
+                &lambda_parameters(&args(), &list_list_int).unwrap(),
                 &[HashSet::new(), HashSet::from([0])],
                 list_list_int.as_arrow(),
             )
@@ -1332,8 +1308,8 @@ mod tests {
     fn test_arguments_schema_from_logical_args() {
         let list_list_int = list_list_int();
 
-        let schemas = ScalarUDF::new_from_impl(ListMapFunc)
-            .arguments_schema_from_logical_args(&[], &list_list_int)
+        let schemas = list_map_udf()
+            .arguments_schema_from_logical_args(&args(), &list_list_int)
             .unwrap();
 
         assert_eq!(

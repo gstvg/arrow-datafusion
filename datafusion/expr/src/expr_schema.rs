@@ -16,26 +16,31 @@
 // under the License.
 
 use super::{Between, Expr, Like};
-use crate::expr::{
-    AggregateFunction, Alias, BinaryExpr, Cast, InList, InSubquery, Lambda, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction,
-    AggregateFunctionParams,
-    WindowFunctionParams,
+use crate::{
+    expr::{
+        AggregateFunction, AggregateFunctionParams, Alias, BinaryExpr, Cast, InList,
+        InSubquery, Lambda, Placeholder, ScalarFunction, TryCast, Unnest, WindowFunction,
+        WindowFunctionParams,
+    },
+    type_coercion::functions::{
+        data_types_with_aggregate_udf, data_types_with_scalar_udf,
+        data_types_with_window_udf,
+    },
+    udf::ReturnFieldArgs,
+    utils, LogicalPlan, Projection, Subquery,
+    WindowFunctionDefinition,
 };
-use crate::type_coercion::functions::{
-    data_types_with_aggregate_udf, data_types_with_scalar_udf, data_types_with_window_udf,
+use arrow::{
+    compute::can_cast_types,
+    datatypes::{DataType, Field},
 };
-use crate::udf::ReturnFieldArgs;
-use crate::{utils, LogicalPlan, Projection, ScalarFunctionArgMetadata, Subquery, WindowFunctionDefinition};
-use arrow::compute::can_cast_types;
-use arrow::datatypes::{DataType, Field};
 use datafusion_common::{
-    not_impl_err, plan_datafusion_err, plan_err, Column, DataFusionError,
-    ExprSchema, Result, TableReference, Spans
+    not_impl_err, plan_datafusion_err, plan_err, Column, DataFusionError, ExprSchema,
+    Result, Spans, TableReference,
 };
 use datafusion_expr_common::type_coercion::binary::BinaryTypeCoercer;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Trait to allow expr to typable with respect to a schema
 pub trait ExprSchemable {
@@ -456,27 +461,22 @@ impl ExprSchemable for Expr {
             }
             // Expr::Lambda(Lambda { params, body}) => body.to_field(schema),
             Expr::ScalarFunction(ScalarFunction { func, args }) => {
-                let args_metadata = args.iter()
-                    .map(|arg| match arg {
-                        Expr::Lambda(Lambda { params, body: _ }) => {
-                            Ok(ScalarFunctionArgMetadata::Lambda(params.as_slice()))
-                        }
-                        _ => Ok(ScalarFunctionArgMetadata::Value(arg.get_type(schema)?)),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let lambdas_schemas =
+                    func.arguments_expr_schema(args, schema)?;
 
-                let lambdas_schemas = func.arguments_expr_schema(&args_metadata, schema)?;
-
-                let (arg_types, fields): (Vec<DataType>, Vec<Arc<Field>>) = std::iter::zip(args, lambdas_schemas)
-                    // .map(|(e, schema)| e.to_field(schema).map(|(_, f)| f))
-                    .map(|(e, schema)| match e {
-                        Expr::Lambda(Lambda{ params: _, body}) => body.to_field(&schema).map(|(_, f)| f),
-                        _ => e.to_field(&schema).map(|(_, f)| f)
-                    })
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .map(|f| (f.data_type().clone(), f))
-                    .unzip();
+                let (arg_types, fields): (Vec<DataType>, Vec<Arc<Field>>) =
+                    std::iter::zip(args, lambdas_schemas)
+                        // .map(|(e, schema)| e.to_field(schema).map(|(_, f)| f))
+                        .map(|(e, schema)| match e {
+                            Expr::Lambda(Lambda { params: _, body }) => {
+                                body.to_field(&schema).map(|(_, f)| f)
+                            }
+                            _ => e.to_field(&schema).map(|(_, f)| f),
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                        .into_iter()
+                        .map(|f| (f.data_type().clone(), f))
+                        .unzip();
                 // Verify that function is invoked with correct number and type of arguments as defined in `TypeSignature`
                 let new_data_types = data_types_with_scalar_udf(&arg_types, func)
                     .map_err(|err| {
@@ -511,7 +511,7 @@ impl ExprSchemable for Expr {
                     .iter()
                     .map(|e| matches!(e, Expr::Lambda { .. }))
                     .collect::<Vec<_>>();
-                
+
                 let args = ReturnFieldArgs {
                     arg_fields: &new_fields,
                     scalar_arguments: &arguments,
