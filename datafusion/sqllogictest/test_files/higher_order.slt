@@ -52,6 +52,22 @@ SELECT t.number, array_transform([1, 2], e1 -> 24) from t;
 40 [24, 24]
 60 [24, 24]
 
+# uses only the first parameter
+query ?
+SELECT array_transform([1, 2], (v, i) -> v+1) from t;
+----
+[2, 3]
+[2, 3]
+[2, 3]
+
+# uses only the second parameter
+query ?
+SELECT array_transform([10, 20], (v, i) -> i) from t;
+----
+[1, 2]
+[1, 2]
+[1, 2]
+
 # shadows parent lambda variable
 query ?
 SELECT array_transform([[1, 2]], a -> array_transform(a, a -> a+1))

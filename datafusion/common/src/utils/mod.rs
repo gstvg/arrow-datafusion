@@ -31,15 +31,17 @@ use arrow::array::{
     cast::AsArray,
 };
 use arrow::array::{
-    BooleanArray, Datum, GenericListArray, Int32Array, Int64Array, MutableArrayData,
-    Scalar, make_array,
+    ArrowPrimitiveType, BooleanArray, Datum, GenericListArray, Int32Array, Int64Array,
+    MutableArrayData, PrimitiveArray, Scalar, make_array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::kernels::cmp::neq;
 use arrow::compute::kernels::length::length;
 use arrow::compute::kernels::zip::zip;
 use arrow::compute::{SortColumn, SortOptions, partition};
-use arrow::datatypes::{DataType, Field, SchemaRef};
+use arrow::datatypes::{
+    ArrowNativeType, DataType, Field, Int32Type, Int64Type, SchemaRef,
+};
 #[cfg(feature = "sql")]
 use sqlparser::{ast::Ident, dialect::GenericDialect, parser::Parser};
 use std::borrow::{Borrow, Cow};
@@ -1141,6 +1143,78 @@ fn truncate_list_nulls<O: OffsetSizeTrait>(
     Ok(list.clone())
 }
 
+/// If `array` is a list or a map, returns a new array of the same length as it's inner values
+/// where each value is the 1-based index within the sublist it's contained. Example:
+///
+/// `[[1], [2, 3], [4, 5, 6]] =>  [1, 1, 2, 1, 2, 3]`
+///
+/// Otherwise return an error
+pub fn list_values_index(array: &dyn Array) -> Result<ArrayRef> {
+    match array.data_type() {
+        DataType::List(_) => Ok(Arc::new(variable_size_list_values_index::<Int32Type>(
+            array.as_list::<i32>().offsets(),
+        ))),
+        DataType::LargeList(_) => {
+            Ok(Arc::new(variable_size_list_values_index::<Int64Type>(
+                array.as_list::<i64>().offsets(),
+            )))
+        }
+        DataType::ListView(_) => {
+            Ok(Arc::new(variable_size_list_values_index::<Int32Type>(
+                array.as_list_view::<i32>().offsets(),
+            )))
+        }
+        DataType::LargeListView(_) => {
+            Ok(Arc::new(variable_size_list_values_index::<Int64Type>(
+                array.as_list_view::<i64>().offsets(),
+            )))
+        }
+        DataType::FixedSizeList(_, _) => {
+            let fixed_size_list = array.as_fixed_size_list();
+
+            Ok(Arc::new(fixed_size_list_values_index(
+                fixed_size_list.value_length(),
+                fixed_size_list.len(),
+            )?))
+        }
+        DataType::Map(_, _) => Ok(Arc::new(
+            variable_size_list_values_index::<Int32Type>(array.as_map().offsets()),
+        )),
+        other => _exec_err!("expected list, got {other}"),
+    }
+}
+
+/// [0, 2, 2, 5, 6] -> [1, 2, 1, 2, 3, 1]
+fn variable_size_list_values_index<T: ArrowPrimitiveType>(
+    offsets: &[T::Native],
+) -> PrimitiveArray<T> {
+    let mut indices = Vec::with_capacity(
+        offsets[offsets.len() - 1].to_usize().unwrap() - offsets[0].to_usize().unwrap(),
+    );
+
+    for w in offsets.windows(2) {
+        let len = w[1].as_usize() - w[0].as_usize();
+        indices.extend((1..1 + len).map(T::Native::usize_as));
+    }
+
+    PrimitiveArray::new(indices.into(), None)
+}
+
+/// (2, 3) -> [1, 2, 1, 2, 1, 2]
+fn fixed_size_list_values_index(list_size: i32, array_len: usize) -> Result<Int32Array> {
+    let list_size = list_size.to_usize().ok_or_else(|| {
+        _exec_datafusion_err!("fsl_values_index: invalid list_size {list_size}")
+    })?;
+
+    let mut indices = Vec::with_capacity(list_size * array_len);
+
+    for _ in 0..array_len {
+        indices.extend((1..1 + list_size).map(|j| j as i32));
+    }
+
+    Ok(PrimitiveArray::new(indices.into(), None))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1613,5 +1687,82 @@ mod tests {
             res.as_fixed_size_list().values(),
             expected.as_fixed_size_list().values()
         );
+    }
+
+    #[test]
+    fn test_list_array_values_index() {
+        assert_eq!(
+            variable_size_list_values_index::<Int32Type>(&OffsetBuffer::from_lengths([
+                1, 3, 0, 2,
+            ])),
+            Int32Array::from(vec![1, 1, 2, 3, 1, 2])
+        );
+
+        assert_eq!(
+            variable_size_list_values_index::<Int32Type>(&OffsetBuffer::from_lengths([])),
+            Int32Array::new_null(0)
+        );
+
+        assert_eq!(
+            variable_size_list_values_index::<Int32Type>(&OffsetBuffer::from_lengths([
+                0
+            ])),
+            Int32Array::new_null(0)
+        );
+
+        assert_eq!(
+            variable_size_list_values_index::<Int32Type>(&OffsetBuffer::from_lengths([
+                0, 0
+            ])),
+            Int32Array::new_null(0)
+        );
+
+        assert_eq!(
+            variable_size_list_values_index::<Int32Type>(&OffsetBuffer::from_lengths([
+                1
+            ])),
+            Int32Array::from(vec![1])
+        );
+
+        assert_eq!(
+            variable_size_list_values_index::<Int32Type>(&OffsetBuffer::from_lengths([
+                2
+            ])),
+            Int32Array::from(vec![1, 2])
+        );
+    }
+
+    #[test]
+    fn test_fsl_values_index() {
+        assert_eq!(
+            fixed_size_list_values_index(2, 3).unwrap(),
+            Int32Array::from(vec![1, 2, 1, 2, 1, 2])
+        );
+
+        assert_eq!(
+            fixed_size_list_values_index(1, 3).unwrap(),
+            Int32Array::from(vec![1, 1, 1])
+        );
+
+        assert_eq!(
+            fixed_size_list_values_index(2, 1).unwrap(),
+            Int32Array::from(vec![1, 2])
+        );
+
+        assert_eq!(
+            fixed_size_list_values_index(2, 0).unwrap(),
+            Int32Array::new_null(0)
+        );
+        assert_eq!(
+            fixed_size_list_values_index(0, 2).unwrap(),
+            Int32Array::new_null(0)
+        );
+        assert_eq!(
+            fixed_size_list_values_index(0, 0).unwrap(),
+            Int32Array::new_null(0)
+        );
+
+        fixed_size_list_values_index(-1, 2).unwrap_err();
+        fixed_size_list_values_index(-1, 0).unwrap_err();
     }
 }

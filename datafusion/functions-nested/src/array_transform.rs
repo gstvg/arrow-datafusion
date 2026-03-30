@@ -26,7 +26,9 @@ use arrow::{
 };
 use datafusion_common::{
     Result, exec_err, plan_err,
-    utils::{adjust_offsets_for_slice, list_values, take_function_args},
+    utils::{
+        adjust_offsets_for_slice, list_values, list_values_index, take_function_args,
+    },
 };
 use datafusion_expr::{
     ColumnarValue, Documentation, HigherOrderFunctionArgs, HigherOrderReturnFieldArgs,
@@ -135,19 +137,21 @@ impl HigherOrderUDF for ArrayTransform {
             );
         };
 
-        let field = match list.data_type() {
-            DataType::List(field) => field,
-            DataType::LargeList(field) => field,
-            DataType::FixedSizeList(field, _) => field,
+        let (field, index_type) = match list.data_type() {
+            DataType::List(field) => (field, DataType::Int32),
+            DataType::LargeList(field) => (field, DataType::Int64),
+            DataType::FixedSizeList(field, _) => (field, DataType::Int32),
             _ => return plan_err!("expected list, got {list}"),
         };
 
-        // we don't need to check whether the lambda contains more than two parameters,
-        // e.g. array_transform([], (v, i, j) -> v+i+j), as datafusion will do that for us
+        // we don't need to omit the index in the case the lambda don't specify, e.g. array_transform([], v -> v*2),
+        // nor check whether the lambda contains more than two parameters, e.g. array_transform([], (v, i, j) -> v+i+j),
+        // as datafusion will do that for us
         let value = Field::new("", field.data_type().clone(), field.is_nullable())
             .with_metadata(field.metadata().clone());
+        let index = Field::new("", index_type, false);
 
-        Ok(vec![vec![value]])
+        Ok(vec![vec![value, index]])
     }
 
     fn return_field_from_args(
@@ -197,10 +201,11 @@ impl HigherOrderUDF for ArrayTransform {
 
         // by passing closures, lambda.evaluate can evaluate only those actually needed
         let values_param = || Ok(Arc::clone(&list_values));
+        let indices_param = || list_values_index(&list_array);
 
         // call the transforming lambda
         let transformed_values = lambda
-            .evaluate(&[&values_param])?
+            .evaluate(&[&values_param, &indices_param])?
             .into_array(list_values.len())?;
 
         let field = match args.return_field.data_type() {
