@@ -340,18 +340,10 @@ mod tests {
         create_physical_expr(
             &Expr::HigherOrderFunction(HigherOrderFunction::new(
                 array_transform,
-                vec![
-                    col("list"),
-                    lambda(
-                        ["v"],
-                        lit(100i32)
-                            / lambda_var(
-                                "v",
-                                Arc::new(Field::new("v", DataType::Int32, true)),
-                            ),
-                    ),
-                ],
-            )),
+                vec![col("list"), lambda(["v"], lit(100i32) / lambda_var("v"))],
+            ))
+            .resolve_lambda_variables(&schema)?
+            .data,
             &schema,
             &ExecutionProps::new(),
         )?

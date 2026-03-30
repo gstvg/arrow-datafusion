@@ -145,9 +145,13 @@ pub fn lambda_variable(
 
     let schema_field = schema.field(index);
 
-    if field.as_ref() != schema_field {
+    // sanity check
+    if field.data_type() != schema_field.data_type()
+        || field.is_nullable() != schema_field.is_nullable()
+        || field.metadata() != schema_field.metadata()
+    {
         return plan_err!(
-            "LambdaVariable owned field differ from schema field {field} != {schema_field}"
+            "LambdaVariable owned field differ from schema field(name ignored) {field} != {schema_field}"
         );
     }
 

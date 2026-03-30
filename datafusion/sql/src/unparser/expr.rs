@@ -2052,16 +2052,7 @@ mod tests {
             (
                 Expr::HigherOrderFunction(HigherOrderFunction::new(
                     Arc::new(DummyHigherOrderUDF),
-                    vec![
-                        col("a"),
-                        lambda(
-                            ["v"],
-                            -lambda_var(
-                                "v",
-                                Arc::new(Field::new("", DataType::Null, true)),
-                            ),
-                        ),
-                    ],
+                    vec![col("a"), lambda(["v"], -lambda_var("v"))],
                 )),
                 r#"dummy_udhof(a, (v) -> -v)"#,
             ),

@@ -29,7 +29,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::metadata::{FieldMetadata, format_type_and_metadata};
 use datafusion_common::{
     DFSchema, Result, ScalarValue, ToDFSchema, exec_err, internal_datafusion_err,
-    not_impl_err, plan_err,
+    not_impl_err, plan_datafusion_err, plan_err,
 };
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::{
@@ -489,7 +489,9 @@ pub fn create_physical_expr(
             spans: _,
         }) => expressions::lambda_variable(
             name,
-            Arc::clone(field),
+            Arc::clone(field.as_ref().ok_or_else(|| {
+                plan_datafusion_err!("unresolved LambdaVariable {name}")
+            })?),
             input_dfschema.as_arrow(),
         ),
         other => {

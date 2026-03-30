@@ -207,9 +207,12 @@ impl ExprSchemable for Expr {
                 Ok(self.to_field(schema)?.1.data_type().clone())
             }
             Expr::Lambda(Lambda { params: _, body }) => body.get_type(schema),
-            Expr::LambdaVariable(LambdaVariable { field, .. }) => {
-                Ok(field.data_type().clone())
-            }
+            Expr::LambdaVariable(LambdaVariable { field, .. }) => match field {
+                Some(f) => Ok(f.data_type().clone()),
+                // If the lambda variable's field hasn't been specified, treat it as
+                // null (unspecified lambda variables generate an error during planning)
+                None => Ok(DataType::Null),
+            },
         }
     }
 
@@ -367,7 +370,12 @@ impl ExprSchemable for Expr {
                 Ok(self.to_field(input_schema)?.1.is_nullable())
             }
             Expr::Lambda(l) => l.body.nullable(input_schema),
-            Expr::LambdaVariable(LambdaVariable { field, .. }) => Ok(field.is_nullable()),
+            Expr::LambdaVariable(LambdaVariable { field, .. }) => match field {
+                Some(f) => Ok(f.is_nullable()),
+                // If the lambda variable's field hasn't been specified, treat it as
+                // null (unspecified lambda variables generate an error during planning)
+                None => Ok(true),
+            },
         }
     }
 
@@ -590,6 +598,9 @@ impl ExprSchemable for Expr {
                 id: _,
                 field: Some(field),
             }) => Ok(Arc::clone(field).renamed(&schema_name)),
+            Expr::LambdaVariable(LambdaVariable {
+                field: Some(field), ..
+            }) => Ok(Arc::clone(field).renamed(&schema_name)),
             Expr::Like(_)
             | Expr::SimilarTo(_)
             | Expr::Not(_)
@@ -603,7 +614,8 @@ impl ExprSchemable for Expr {
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
             | Expr::Unnest(_)
-            | Expr::Lambda(_) => Ok(Arc::new(Field::new(
+            | Expr::Lambda(_)
+            | Expr::LambdaVariable(_) => Ok(Arc::new(Field::new(
                 &schema_name,
                 self.get_type(schema)?,
                 self.nullable(schema)?,
@@ -640,7 +652,6 @@ impl ExprSchemable for Expr {
 
                 func.func.return_field_from_args(args)
             }
-            Expr::LambdaVariable(l) => Ok(Arc::clone(&l.field)),
         }?;
 
         Ok((
