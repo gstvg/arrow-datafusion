@@ -31,10 +31,10 @@ use arrow::array::{
     cast::AsArray,
 };
 use arrow::array::{
-    BooleanArray, Datum, GenericListArray, Int32Array, Int64Array, MutableArrayData,
-    Scalar, make_array,
+    BooleanArray, Datum, GenericListArray, GenericListViewArray, Int32Array, Int64Array,
+    MapArray, MutableArrayData, Scalar, make_array,
 };
-use arrow::buffer::OffsetBuffer;
+use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::compute::kernels::cmp::neq;
 use arrow::compute::kernels::length::length;
 use arrow::compute::kernels::zip::zip;
@@ -1040,12 +1040,63 @@ pub fn adjust_offsets_for_slice<O: OffsetSizeTrait>(
 pub fn remove_list_null_values(array: &ArrayRef) -> Result<ArrayRef> {
     // todo: handle list view and map
     match array.data_type() {
-        DataType::List(_) => Ok(Arc::new(truncate_list_nulls(array.as_list::<i32>())?)),
-        DataType::LargeList(_) => {
-            Ok(Arc::new(truncate_list_nulls(array.as_list::<i64>())?))
+        DataType::List(_) => truncate_list_array_null_values(array.as_list::<i32>()),
+        DataType::LargeList(_) => truncate_list_array_null_values(array.as_list::<i64>()),
+        DataType::ListView(_) => truncate_list_view_nulls(array.as_list_view::<i32>()),
+        DataType::LargeListView(_) => {
+            truncate_list_view_nulls(array.as_list_view::<i64>())
         }
         DataType::FixedSizeList(_, _) => replace_nulls_with_first_valid(array),
+        DataType::Map(_, _) => {
+            let map = array.as_map();
+            let lengths = length(array)?;
+
+            if let Some(nulls) = array.nulls()
+                && let Some((values, offsets)) =
+                    truncate_list_nulls(map.entries(), nulls, &lengths, map.offsets())?
+            {
+                let (field, ordered) = match map.data_type() {
+                    DataType::Map(field, ordered) => (Arc::clone(field), ordered),
+                    _ => unreachable!(),
+                };
+
+                Ok(Arc::new(MapArray::try_new(
+                    field,
+                    offsets,
+                    values.as_struct().clone(),
+                    map.nulls().cloned(),
+                    *ordered,
+                )?))
+            } else {
+                Ok(Arc::clone(array))
+            }
+        }
         dt => _exec_err!("expected list, got {dt}"),
+    }
+}
+
+pub fn truncate_list_array_null_values<O: OffsetSizeTrait>(
+    list: &GenericListArray<O>,
+) -> Result<ArrayRef> {
+    let lengths = length(list)?;
+
+    if let Some(nulls) = list.nulls()
+        && let Some((values, offsets)) =
+            truncate_list_nulls(list.values(), nulls, &lengths, list.offsets())?
+    {
+        let field = match list.data_type() {
+            DataType::List(field) | DataType::LargeList(field) => Arc::clone(field),
+            _ => unreachable!(),
+        };
+
+        Ok(Arc::new(GenericListArray::try_new(
+            field,
+            offsets,
+            values,
+            list.nulls().cloned(),
+        )?))
+    } else {
+        Ok(Arc::new(list.clone()))
     }
 }
 
@@ -1058,6 +1109,12 @@ fn replace_nulls_with_first_valid(array: &ArrayRef) -> Result<ArrayRef> {
                 return Ok(Arc::clone(array));
             }
 
+            let list = array.as_fixed_size_list();
+            let field = match list.data_type() {
+                DataType::FixedSizeList(f, _) => Arc::clone(f),
+                _ => unreachable!(),
+            };
+
             let first_valid = nulls
                 .inner()
                 .set_indices()
@@ -1066,19 +1123,22 @@ fn replace_nulls_with_first_valid(array: &ArrayRef) -> Result<ArrayRef> {
 
             let mask = BooleanArray::new(nulls.inner().clone(), None);
             // perf: remove the null buffer so zip doesn't unnecessarily zip it too
-            let without_null_buffer =
-                make_array(array.to_data().into_builder().nulls(None).build()?);
+            let without_null_buffer = FixedSizeListArray::new(
+                Arc::clone(&field),
+                list.value_length(),
+                Arc::clone(list.values()),
+                None,
+            );
             let first_valid = array.slice(first_valid, 1);
             let zipped = zip(&mask, &without_null_buffer, &Scalar::new(first_valid))?;
-            let zipped_with_null_buffer = make_array(
-                zipped
-                    .to_data()
-                    .into_builder()
-                    .nulls(Some(nulls.clone()))
-                    .build()?,
+            let zipped_with_null_buffer = FixedSizeListArray::new(
+                field,
+                list.value_length(),
+                Arc::clone(zipped.as_fixed_size_list().values()),
+                Some(nulls.clone()),
             );
 
-            return Ok(zipped_with_null_buffer);
+            return Ok(Arc::new(zipped_with_null_buffer));
         }
     }
 
@@ -1086,59 +1146,73 @@ fn replace_nulls_with_first_valid(array: &ArrayRef) -> Result<ArrayRef> {
 }
 
 fn truncate_list_nulls<O: OffsetSizeTrait>(
-    list: &GenericListArray<O>,
-) -> Result<GenericListArray<O>> {
-    if let Some(nulls) = list.nulls()
+    values: &dyn Array,
+    nulls: &NullBuffer,
+    lengths: &ArrayRef,
+    offsets: &OffsetBuffer<O>,
+) -> Result<Option<(ArrayRef, OffsetBuffer<O>)>> {
+    let zero: &dyn Datum = if lengths.data_type() == &DataType::Int32 {
+        &Int32Array::new_scalar(0)
+    } else {
+        &Int64Array::new_scalar(0)
+    };
+
+    let not_empty = neq(&lengths, zero)?;
+    let null_and_non_empty = &!nulls.inner() & not_empty.values();
+
+    if null_and_non_empty.count_set_bits() > 0 {
+        let array_data = values.to_data();
+        let capacity = offsets[offsets.len() - 1] - offsets[0];
+        let mut mutable_array_data =
+            MutableArrayData::new(vec![&array_data], false, capacity.as_usize());
+
+        let valid_or_empty = nulls.inner() | &!not_empty.values();
+
+        for (start, end) in valid_or_empty.set_slices() {
+            mutable_array_data.extend(
+                0,
+                offsets[start].as_usize(),
+                offsets[end].as_usize(),
+            );
+        }
+
+        let lengths = std::iter::zip(offsets.lengths(), nulls)
+            .map(|(length, is_valid)| if is_valid { length } else { 0 });
+
+        let offsets = OffsetBuffer::from_lengths(lengths);
+        let values = make_array(mutable_array_data.freeze());
+
+        Ok(Some((values, offsets)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn truncate_list_view_nulls<O: OffsetSizeTrait>(
+    array: &GenericListViewArray<O>,
+) -> Result<ArrayRef> {
+    if let Some(nulls) = array.nulls()
         && nulls.null_count() > 0
     {
-        let lengths = length(list)?;
-        let zero: &dyn Datum = if lengths.data_type() == &DataType::Int32 {
-            &Int32Array::new_scalar(0)
-        } else {
-            &Int64Array::new_scalar(0)
+        let sizes = std::iter::zip(array.sizes(), nulls)
+            .map(|(size, is_valid)| if is_valid { *size } else { O::zero() })
+            .collect();
+
+        let field = match array.data_type() {
+            DataType::ListView(f) | DataType::LargeListView(f) => Arc::clone(f),
+            _ => unreachable!(),
         };
 
-        let not_empty = neq(&lengths, zero)?;
-        let null_and_non_empty = &!nulls.inner() & not_empty.values();
-
-        if null_and_non_empty.count_set_bits() > 0 {
-            let array_data = list.values().to_data();
-            let offsets = list.offsets();
-            let capacity = offsets[offsets.len() - 1] - offsets[0];
-            let mut mutable_array_data =
-                MutableArrayData::new(vec![&array_data], false, capacity.as_usize());
-
-            let valid_or_empty = nulls.inner() | &!not_empty.values();
-
-            for (start, end) in valid_or_empty.set_slices() {
-                mutable_array_data.extend(
-                    0,
-                    offsets[start].as_usize(),
-                    offsets[end].as_usize(),
-                );
-            }
-
-            let lengths = std::iter::zip(offsets.lengths(), nulls)
-                .map(|(length, is_valid)| if is_valid { length } else { 0 });
-
-            let offsets = OffsetBuffer::from_lengths(lengths);
-            let values = make_array(mutable_array_data.freeze());
-
-            let field = match list.data_type() {
-                DataType::List(field) => field,
-                DataType::LargeList(field) => field,
-                _ => unreachable!(),
-            };
-
-            return Ok(GenericListArray::try_new(
-                Arc::clone(field),
-                offsets,
-                values,
-                list.nulls().cloned(),
-            )?);
-        }
+        Ok(Arc::new(GenericListViewArray::try_new(
+            field,
+            array.offsets().clone(),
+            sizes,
+            Arc::clone(array.values()),
+            Some(nulls.clone()),
+        )?))
+    } else {
+        Ok(Arc::new(array.clone()))
     }
-    Ok(list.clone())
 }
 
 #[cfg(test)]
