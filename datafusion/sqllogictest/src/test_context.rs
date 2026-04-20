@@ -50,11 +50,12 @@ use datafusion::{
 };
 use datafusion_spark::SessionStateBuilderSpark;
 
+use crate::array_reduce::ArrayReduce;
 use crate::is_spark_path;
 use async_trait::async_trait;
 use datafusion::common::cast::as_float64_array;
-use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use log::info;
 use sqlparser::ast;
 use tempfile::TempDir;
@@ -176,6 +177,13 @@ impl TestContext {
             "async_udf.slt" => {
                 info!("Registering dummy async udf");
                 register_async_abs_udf(test_ctx.session_ctx())
+            }
+            "higher_order.slt" => {
+                info!("Registering array_reduce");
+                test_ctx
+                    .ctx
+                    .register_udhof(Arc::new(ArrayReduce::new()))
+                    .unwrap();
             }
             _ => {
                 info!("Using default SessionContext");

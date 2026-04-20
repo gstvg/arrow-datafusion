@@ -132,7 +132,8 @@ pub use udf::{
 };
 pub use udhof::{
     HigherOrderFunctionArgs, HigherOrderReturnFieldArgs, HigherOrderSignature,
-    HigherOrderTypeSignature, HigherOrderUDF, LambdaArgument, ValueOrLambda,
+    HigherOrderTypeSignature, HigherOrderUDF, LambdaArgument, LambdaParametersProgress,
+    ValueOrLambda,
 };
 pub use udwf::{LimitEffect, ReversedUDWF, WindowUDF, WindowUDFImpl};
 pub use window_frame::{WindowFrame, WindowFrameBound, WindowFrameUnits};

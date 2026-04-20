@@ -30,7 +30,8 @@ use datafusion_common::{
 };
 use datafusion_expr::{
     ColumnarValue, Documentation, HigherOrderFunctionArgs, HigherOrderReturnFieldArgs,
-    HigherOrderSignature, HigherOrderUDF, ValueOrLambda, Volatility,
+    HigherOrderSignature, HigherOrderUDF, LambdaParametersProgress, ValueOrLambda,
+    Volatility,
 };
 use datafusion_macros::user_doc;
 use std::{fmt::Debug, sync::Arc};
@@ -124,16 +125,12 @@ impl HigherOrderUDF for ArrayTransform {
         Ok(vec![coerced])
     }
 
-    fn lambda_parameters(&self, value_fields: &[FieldRef]) -> Result<Vec<Vec<Field>>> {
-        let list = if value_fields.len() == 1 {
-            &value_fields[0]
-        } else {
-            return plan_err!(
-                "{} function requires 1 value arguments, got {}",
-                self.name(),
-                value_fields.len()
-            );
-        };
+    fn lambda_parameters(
+        &self,
+        _step: usize,
+        fields: &[ValueOrLambda<FieldRef, Option<FieldRef>>],
+    ) -> Result<LambdaParametersProgress> {
+        let (list, _lambda) = value_lambda_pair(self.name(), fields)?;
 
         let field = match list.data_type() {
             DataType::List(field) => field,
@@ -147,7 +144,9 @@ impl HigherOrderUDF for ArrayTransform {
         let value = Field::new("", field.data_type().clone(), field.is_nullable())
             .with_metadata(field.metadata().clone());
 
-        Ok(vec![vec![value]])
+        Ok(LambdaParametersProgress::Complete(vec![vec![Arc::new(
+            value,
+        )]]))
     }
 
     fn return_field_from_args(
