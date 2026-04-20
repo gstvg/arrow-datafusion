@@ -26,6 +26,7 @@
 
 //! DataFusion sqllogictest driver
 
+mod array_reduce;
 mod engines;
 mod test_file;
 

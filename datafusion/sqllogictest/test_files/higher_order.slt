@@ -191,7 +191,7 @@ DataFusion error: Error during planning: array_transform function requires 1 val
 query error DataFusion error: Error during planning: array_transform expected a list as first argument, got Int64
 select array_transform(1, v -> v*2);
 
-query error DataFusion error: Error during planning: array_transform expects a value followed by a lambda, got Lambda\(Field \{ name: "\(v\) \-> v \* Int64\(2\)", data_type: Int64, nullable: true \}\) and Value\(Field \{ name: "make_array\(Int64\(1\),Int64\(2\)\)", data_type: List\(Field \{ data_type: Int64, nullable: true \}\), nullable: true \}\)
+query error DataFusion error: Error during planning: array_transform expects a value followed by a lambda, got Lambda\(None\) and Value\(Field \{ name: "make_array\(Int64\(1\),Int64\(2\)\)", data_type: List\(Field \{ data_type: Int64, nullable: true \}\), nullable: true \}\)
 select array_transform(v -> v*2, [1, 2]);
 
 query error DataFusion error: Error during planning: lambda defined 3 params but UDF support only 1
@@ -211,6 +211,48 @@ SELECT array_transform([1], v -> v -> v+1);
 
 query error DataFusion error: SQL error: ParserError\("Expected: an expression, found: \) at Line: 1, Column: 30"\)
 SELECT array_transform([1], () -> 1);
+
+statement ok
+CREATE TABLE tt as select [] as null_list, 0 as int;
+
+query R
+select array_reduce([1.1, 2.1], tt.int, (acc, v) -> acc + v, acc -> acc * 2) from tt;
+----
+6.4
+
+query TT
+explain select array_reduce([1.1, 2.1], tt.int, (acc, v) -> acc + v, acc -> acc * 2) from tt;
+----
+logical_plan
+01)Projection: array_reduce(FixedSizeList([1.1, 2.1]), CAST(tt.int AS Float64), (acc, v) -> acc + v, (acc) -> acc * Float64(2)) AS array_reduce(make_array(Float64(1.1),Float64(2.1)),tt.int,(acc, v) -> acc + v,(acc) -> acc * Int64(2))
+02)--TableScan: tt projection=[int]
+physical_plan
+01)ProjectionExec: expr=[array_reduce([1.1, 2.1], CAST(int@0 AS Float64), (acc, v) -> acc@0 + v@1, (acc) -> acc@0 * 2) as array_reduce(make_array(Float64(1.1),Float64(2.1)),tt.int,(acc, v) -> acc + v,(acc) -> acc * Int64(2))]
+02)--DataSourceExec: partitions=1, partition_sizes=[1]
+
+query ?
+select array_reduce([1, 2], tt.null_list, (acc, v) -> array_append(acc, v), acc -> acc) from tt;
+----
+[1, 2]
+
+# test higher-order functions support for multi-step lambda planning
+# and casting it's value argument based on the output of it's lambdas
+# the planning of merge acc parameter depends on itself, and the finish acc parameter depends
+# on merge as well. After the lambdas are planned, it also informs datafusion
+# to cast it's initial_value `[]` List(Null) to List(Int64) which is the output of the merge lambda, so
+# that the user doesn't need to write an explicit cast
+query TT
+explain select array_reduce([1, 2], null_list, (acc, v) -> array_append(acc, v), acc -> acc) from tt;
+----
+logical_plan
+01)Projection: array_reduce(FixedSizeList([1, 2]), CAST(tt.null_list AS List(Int64)), (acc, v) -> array_append(acc, v), (acc) -> acc) AS array_reduce(make_array(Int64(1),Int64(2)),tt.null_list,(acc, v) -> array_append(acc,v),(acc) -> acc)
+02)--TableScan: tt projection=[null_list]
+physical_plan
+01)ProjectionExec: expr=[array_reduce([1, 2], CAST(null_list@0 AS List(Int64)), (acc, v) -> array_append(acc@0, v@1), (acc) -> acc@0) as array_reduce(make_array(Int64(1),Int64(2)),tt.null_list,(acc, v) -> array_append(acc,v),(acc) -> acc)]
+02)--DataSourceExec: partitions=1, partition_sizes=[1]
+
+statement ok
+drop table tt;
 
 statement ok
 drop table t;

@@ -1712,8 +1712,9 @@ mod tests {
 
         fn lambda_parameters(
             &self,
-            _value_fields: &[FieldRef],
-        ) -> Result<Vec<Vec<Field>>> {
+            _step: usize,
+            _fields: &[ValueOrLambda<FieldRef, Option<FieldRef>>],
+        ) -> Result<crate::LambdaParametersProgress> {
             unimplemented!("mock udhof")
         }
 

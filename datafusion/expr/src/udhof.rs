@@ -20,7 +20,7 @@
 use crate::expr::schema_name_from_exprs_comma_separated_without_space;
 use crate::{ColumnarValue, Documentation, Expr};
 use arrow::array::{ArrayRef, RecordBatch};
-use arrow::datatypes::{DataType, Field, FieldRef, Schema};
+use arrow::datatypes::{DataType, FieldRef, Schema};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{Result, ScalarValue, not_impl_err};
 use datafusion_expr_common::dyn_eq::{DynEq, DynHash};
@@ -73,6 +73,8 @@ pub struct HigherOrderSignature {
     pub type_signature: HigherOrderTypeSignature,
     /// The volatility of the function. See [Volatility] for more information.
     pub volatility: Volatility,
+    /// Wether `cast_values_for_lambdas` should be called
+    pub cast_values_for_lambdas: bool,
 }
 
 impl HigherOrderSignature {
@@ -81,6 +83,7 @@ impl HigherOrderSignature {
         HigherOrderSignature {
             type_signature,
             volatility,
+            cast_values_for_lambdas: false,
         }
     }
 
@@ -89,6 +92,7 @@ impl HigherOrderSignature {
         Self {
             type_signature: HigherOrderTypeSignature::UserDefined,
             volatility,
+            cast_values_for_lambdas: false,
         }
     }
 
@@ -97,6 +101,7 @@ impl HigherOrderSignature {
         Self {
             type_signature: HigherOrderTypeSignature::VariadicAny,
             volatility,
+            cast_values_for_lambdas: false,
         }
     }
 
@@ -105,7 +110,15 @@ impl HigherOrderSignature {
         Self {
             type_signature: HigherOrderTypeSignature::Any(arg_count),
             volatility,
+            cast_values_for_lambdas: false,
         }
+    }
+
+    /// Indicate that `cast_values_for_lambdas` should be called
+    pub fn with_cast_values_for_lambdas(mut self) -> Self {
+        self.cast_values_for_lambdas = true;
+
+        self
     }
 }
 
@@ -260,6 +273,11 @@ pub enum ValueOrLambda<V, L> {
     Lambda(L),
 }
 
+pub enum LambdaParametersProgress {
+    Partial(Vec<Option<Vec<FieldRef>>>),
+    Complete(Vec<Vec<FieldRef>>),
+}
+
 /// Trait for implementing user defined higher order functions.
 ///
 /// This trait exposes the full API for implementing user defined functions and
@@ -342,7 +360,18 @@ pub trait HigherOrderUDF: Debug + DynEq + DynHash + Send + Sync + Any {
     ///
     /// The implementation can assume that some other part of the code has coerced
     /// the actual argument types to match [`Self::signature`].
-    fn lambda_parameters(&self, value_fields: &[FieldRef]) -> Result<Vec<Vec<Field>>>;
+    fn lambda_parameters(
+        &self,
+        step: usize,
+        fields: &[ValueOrLambda<FieldRef, Option<FieldRef>>],
+    ) -> Result<LambdaParametersProgress>;
+
+    fn cast_values_for_lambdas(
+        &self,
+        _fields: &[ValueOrLambda<FieldRef, FieldRef>],
+    ) -> Result<Vec<FieldRef>> {
+        not_impl_err!("{} cast_values_for_lambdas is not implemented", self.name())
+    }
 
     /// What type will be returned by this function, given the arguments?
     ///
@@ -493,8 +522,9 @@ mod tests {
 
         fn lambda_parameters(
             &self,
-            _value_fields: &[FieldRef],
-        ) -> Result<Vec<Vec<Field>>> {
+            _step: usize,
+            _fields: &[ValueOrLambda<FieldRef, Option<FieldRef>>],
+        ) -> Result<LambdaParametersProgress> {
             unimplemented!()
         }
 

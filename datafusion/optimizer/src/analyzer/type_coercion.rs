@@ -770,13 +770,32 @@ impl TreeNodeRewriter for TypeCoercionRewriter<'_> {
                 let current_fields = args
                     .iter()
                     .map(|arg| match arg {
-                        Expr::Lambda(_) => Ok(ValueOrLambda::Lambda(())),
+                        Expr::Lambda(lambda) => Ok(ValueOrLambda::Lambda(
+                            lambda.body.to_field(self.schema)?.1,
+                        )),
                         _ => Ok(ValueOrLambda::Value(arg.to_field(self.schema)?.1)),
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let new_fields =
+                let mut new_fields =
                     value_fields_with_higher_order_udf(&current_fields, func.as_ref())?;
+
+                // todo create a variation of value_fields_with_higher_order_udf that does implement this
+                if func.signature().cast_values_for_lambdas {
+                    let mut new_value_fields =
+                        func.cast_values_for_lambdas(&new_fields)?.into_iter();
+
+                    for new_field in &mut new_fields {
+                        match new_field {
+                            ValueOrLambda::Value(value) => {
+                                *value = new_value_fields.next().expect(
+                                    "new_value_fields len should have been checked above",
+                                )
+                            }
+                            ValueOrLambda::Lambda(_) => {}
+                        }
+                    }
+                };
 
                 let new_args = std::iter::zip(args, new_fields)
                     .map(|(arg, new_field)| match (&arg, new_field) {
