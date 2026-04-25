@@ -27,9 +27,8 @@ use std::sync::Arc;
 use crate::expr_fn::binary_expr;
 use crate::function::WindowFunctionSimplification;
 use crate::logical_plan::Subquery;
-use crate::type_coercion::functions::value_fields_with_higher_order_udf;
 use crate::udhof::HigherOrderUDF;
-use crate::{AggregateUDF, LambdaParametersProgress, ValueOrLambda, Volatility};
+use crate::{AggregateUDF, Volatility};
 use crate::{ExprSchemable, Operator, Signature, WindowFrame, WindowUDF};
 
 use arrow::datatypes::{DataType, Field, FieldRef};
@@ -40,7 +39,7 @@ use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeContainer, TreeNodeRecursion,
 };
 use datafusion_common::{
-    Column, DFSchema, ExprSchema, HashMap, Result, ScalarValue, Spans, TableReference,
+    Column, DFSchema, HashMap, Result, ScalarValue, Spans, TableReference,
 };
 use datafusion_expr_common::placement::ExpressionPlacement;
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
@@ -443,32 +442,6 @@ impl HigherOrderFunction {
 
     pub fn name(&self) -> &str {
         self.func.name()
-    }
-
-    /// Invokes the inner function [`HigherOrderUDF::lambda_parameters`]
-    /// using the arguments of this invocation
-    pub fn lambda_parameters(
-        &self,
-        schema: &dyn ExprSchema,
-    ) -> Result<Vec<Vec<FieldRef>>> {
-        let args = self
-            .args
-            .iter()
-            .map(|e| match e {
-                Expr::Lambda(lambda) => {
-                    Ok(ValueOrLambda::Lambda(Some(lambda.body.to_field(schema)?.1)))
-                }
-                _ => Ok(ValueOrLambda::Value(e.to_field(schema)?.1)),
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let coerced_fields =
-            value_fields_with_higher_order_udf(&args, self.func.as_ref())?;
-
-        match self.func.lambda_parameters(0, &coerced_fields)? {
-            LambdaParametersProgress::Partial(_) => todo!(),
-            LambdaParametersProgress::Complete(items) => Ok(items),
-        }
     }
 }
 
@@ -1395,16 +1368,38 @@ impl GroupingSet {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
 pub struct Lambda {
     /// The parameters names
-    pub params: Vec<String>,
+    pub params: LambdaParams,
     /// The body expression
     pub body: Box<Expr>,
+}
+
+/// The params of a [Lambda]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
+pub enum LambdaParams {
+    Bound(Vec<FieldRef>),
+    Unbound(Vec<String>),
+}
+
+impl LambdaParams {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        let (b, u) = match self {
+            LambdaParams::Bound(fields) => {
+                (Some(fields.iter().map(|f| f.name().as_str())), None)
+            }
+            LambdaParams::Unbound(items) => {
+                (None, Some(items.iter().map(|n| n.as_str())))
+            }
+        };
+
+        b.into_iter().flatten().chain(u.into_iter().flatten())
+    }
 }
 
 impl Lambda {
     /// Create a new lambda expression
     pub fn new(params: Vec<String>, body: Expr) -> Self {
         Self {
-            params,
+            params: LambdaParams::Unbound(params),
             body: Box::new(body),
         }
     }
@@ -3250,7 +3245,7 @@ impl Display for SchemaDisplay<'_> {
                 write!(
                     f,
                     "({}) -> {}",
-                    display_comma_separated(params),
+                    params.names().collect::<Vec<_>>().join(", "),
                     SchemaDisplay(body)
                 )
             }
@@ -3436,7 +3431,12 @@ impl Display for SqlDisplay<'_> {
                 }
             }
             Expr::Lambda(Lambda { params, body }) => {
-                write!(f, "({}) -> {}", params.join(", "), SchemaDisplay(body))
+                write!(
+                    f,
+                    "({}) -> {}",
+                    params.names().collect::<Vec<_>>().join(", "),
+                    SchemaDisplay(body)
+                )
             }
             _ => write!(f, "{}", self.0),
         }
@@ -3759,7 +3759,11 @@ impl Display for Expr {
                 fmt_function(f, fun.name(), false, &fun.args, true)
             }
             Expr::Lambda(Lambda { params, body }) => {
-                write!(f, "({}) -> {body}", params.join(", "))
+                write!(
+                    f,
+                    "({}) -> {body}",
+                    params.names().collect::<Vec<_>>().join(", ")
+                )
             }
             Expr::LambdaVariable(c) => f.write_str(&c.name),
         }

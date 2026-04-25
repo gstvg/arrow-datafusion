@@ -29,13 +29,12 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::datatype::FieldExt;
 use datafusion_common::metadata::{FieldMetadata, format_type_and_metadata};
 use datafusion_common::{
-    DFSchema, Result, ScalarValue, ToDFSchema, exec_err, internal_datafusion_err,
-    not_impl_err, plan_err,
+    DFSchema, Result, ScalarValue, ToDFSchema, exec_err, not_impl_err, plan_err,
 };
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::{
-    Alias, Cast, HigherOrderFunction, InList, Lambda, LambdaVariable, Placeholder,
-    ScalarFunction,
+    Alias, Cast, HigherOrderFunction, InList, Lambda, LambdaParams, LambdaVariable,
+    Placeholder, ScalarFunction,
 };
 use datafusion_expr::var_provider::VarType;
 use datafusion_expr::var_provider::is_system_variables;
@@ -405,41 +404,20 @@ pub fn create_physical_expr(
         Expr::Placeholder(Placeholder { id, .. }) => {
             exec_err!("Placeholder '{id}' was not provided a value for execution.")
         }
-        Expr::HigherOrderFunction(invocation @ HigherOrderFunction { func, args }) => {
-            let num_lambdas = args
-                .iter()
-                .filter(|arg| matches!(arg, Expr::Lambda(_)))
-                .count();
-
-            let mut lambda_parameters =
-                invocation.lambda_parameters(input_dfschema)?.into_iter();
-
-            if num_lambdas > lambda_parameters.len() {
-                return plan_err!(
-                    "{} lambda_parameters returned only {} values for {num_lambdas} lambdas",
-                    func.name(),
-                    lambda_parameters.len()
-                );
-            }
-
+        Expr::HigherOrderFunction(HigherOrderFunction { func, args }) => {
             let physical_args = args
                 .iter()
                 .map(|arg| match arg {
                     Expr::Lambda(lambda) => {
-                        let lambda_parameters = lambda_parameters
-                            .next()
-                            .ok_or_else(|| {
-                                internal_datafusion_err!(
-                                    "lambda_parameters len should have been checked above"
-                                )
-                            })?
-                            .into_iter()
-                            .zip(&lambda.params)
-                            .map(|(field, name)| field.renamed(name.as_str()))
-                            .collect();
+                        let fields = match &lambda.params {
+                            LambdaParams::Bound(fields) => fields,
+                            LambdaParams::Unbound(_names) => {
+                                return plan_err!("unbound lambda");
+                            }
+                        };
 
                         let lambda_schema = DFSchema::from_unqualified_fields(
-                            lambda_parameters,
+                            fields.clone().into(),
                             HashMap::new(),
                         )?;
 
@@ -467,8 +445,13 @@ pub fn create_physical_expr(
                 return plan_err!("lambda doesn't support column capture");
             }
 
+            let fields = match &params {
+                LambdaParams::Bound(fields) => fields,
+                LambdaParams::Unbound(_names) => return plan_err!("unbound lambda"),
+            };
+
             expressions::lambda(
-                params,
+                fields.to_vec(),
                 create_physical_expr(body, input_dfschema, execution_props)?,
             )
         }

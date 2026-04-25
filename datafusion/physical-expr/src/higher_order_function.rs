@@ -39,16 +39,14 @@ use crate::expressions::{LambdaExpr, Literal};
 use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, FieldRef, Schema};
 use datafusion_common::config::{ConfigEntry, ConfigOptions};
-use datafusion_common::datatype::FieldExt;
 use datafusion_common::utils::remove_list_null_values;
 use datafusion_common::{
-    Result, ScalarValue, exec_datafusion_err, exec_err, internal_datafusion_err,
-    internal_err, plan_err,
+    Result, ScalarValue, exec_datafusion_err, internal_err, plan_err,
 };
 use datafusion_expr::type_coercion::functions::value_fields_with_higher_order_udf;
 use datafusion_expr::{
     ColumnarValue, HigherOrderFunctionArgs, HigherOrderReturnFieldArgs, HigherOrderUDF,
-    LambdaArgument, LambdaParametersProgress, ValueOrLambda, Volatility, expr_vec_fmt,
+    LambdaArgument, ValueOrLambda, Volatility, expr_vec_fmt,
 };
 
 /// Physical expression of a higher order function
@@ -258,41 +256,6 @@ impl PhysicalExpr for HigherOrderFunctionExpr {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let fields = arg_fields
-            .iter()
-            .map(|field| match field {
-                ValueOrLambda::Lambda(field) => {
-                    ValueOrLambda::Lambda(Some(Arc::clone(field)))
-                }
-                ValueOrLambda::Value(field) => ValueOrLambda::Value(Arc::clone(field)),
-            })
-            .collect::<Vec<_>>();
-
-        // lambda_parameters refers only to lambdas and not to values, so instead
-        // of zipping it with self.args, we iterate over self.args and only
-        // consume from lambda_parameters when a given argument is a lambda
-        // to reconstruct the arguments list with the correct order
-        // this supports any value and lambda positioning including
-        // multiple lambdas interleaved with values
-        let mut lambda_parameters = match self.fun().lambda_parameters(0, &fields)? {
-            LambdaParametersProgress::Partial(_) => todo!(),
-            LambdaParametersProgress::Complete(items) => items.into_iter(),
-        };
-
-        let num_lambdas = self.args.len() - fields.len();
-
-        // functions can support multiple lambdas where some trailing ones are optional,
-        // but to simplify the implementor, lambda_parameters returns the parameters of all of them,
-        // so we can't do equality check. one example is spark reduce:
-        // https://spark.apache.org/docs/latest/api/sql/index.html#reduce
-        if lambda_parameters.len() < num_lambdas {
-            return exec_err!(
-                "{} invocation defined {num_lambdas} but lambda_parameters returned only {}",
-                self.name(),
-                lambda_parameters.len()
-            );
-        }
-
         let args = self
             .args
             .iter()
@@ -303,26 +266,8 @@ impl PhysicalExpr for HigherOrderFunctionExpr {
                         exec_datafusion_err!("unable to unwrap lambda from {arg}")
                     })?;
 
-                    let lambda_params = lambda_parameters.next().ok_or_else(|| {
-                        internal_datafusion_err!(
-                            "params len should have been checked above"
-                        )
-                    })?;
-
-                    if lambda.params().len() > lambda_params.len() {
-                        return exec_err!(
-                            "lambda defined {} params but UDHOF support only {}",
-                            lambda.params().len(),
-                            lambda_params.len()
-                        );
-                    }
-
-                    let params = std::iter::zip(lambda.params(), lambda_params)
-                        .map(|(name, param)| param.renamed(name.as_str()))
-                        .collect();
-
                     Ok(ValueOrLambda::Lambda(LambdaArgument::new(
-                        params,
+                        lambda.params().to_vec(),
                         Arc::clone(lambda.body()),
                     )))
                 } else {
@@ -457,6 +402,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion_common::Result;
     use datafusion_common::assert_contains;
+    use datafusion_expr::LambdaParametersProgress;
     use datafusion_expr::{
         HigherOrderFunctionArgs, HigherOrderSignature, HigherOrderUDF,
     };
@@ -552,6 +498,10 @@ mod tests {
         assert!(!is_volatile(&stable_arc));
     }
 
+    fn field_a() -> FieldRef {
+        Arc::new(Field::new("a", DataType::Null, true))
+    }
+
     #[test]
     fn test_higher_order_function_wrapped_lambda() {
         let fun = Arc::new(MockHigherOrderUDF {
@@ -562,7 +512,7 @@ mod tests {
 
         let hof = HigherOrderFunctionExpr::try_new(
             fun,
-            vec![lambda(["a"], Arc::new(Literal::new(expected.clone()))).unwrap()],
+            vec![lambda([field_a()], Arc::new(Literal::new(expected.clone()))).unwrap()],
             &Schema::empty(),
             Arc::new(ConfigOptions::new()),
         )
@@ -598,10 +548,11 @@ mod tests {
         let hof = HigherOrderFunctionExpr::try_new(
             fun,
             vec![
-                not(
-                    lambda(["a"], Arc::new(Literal::new(ScalarValue::Int32(Some(42)))))
-                        .unwrap(),
+                not(lambda(
+                    [field_a()],
+                    Arc::new(Literal::new(ScalarValue::Int32(Some(42)))),
                 )
+                .unwrap())
                 .unwrap(),
             ],
             &Schema::empty(),

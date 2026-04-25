@@ -27,8 +27,8 @@ use datafusion_expr::{
     WindowFunctionDefinition,
     arguments::ArgumentName,
     expr::{
-        self, HigherOrderFunction, Lambda, NullTreatment, ScalarFunction, Unnest,
-        WildcardOptions, WindowFunction,
+        self, HigherOrderFunction, Lambda, LambdaParams, NullTreatment, ScalarFunction,
+        Unnest, WildcardOptions, WindowFunction,
     },
     planner::{PlannerResult, RawAggregateExpr, RawWindowExpr},
     type_coercion::functions::value_fields_with_higher_order_udf,
@@ -895,21 +895,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             );
         }
 
-        let params = lambda
-            .params
-            .iter()
-            .map(|p| crate::utils::normalize_ident(p.clone()))
-            .collect();
-
-        let lambda_parameters = std::iter::zip(lambda_params, &params)
-            .map(|(f, n): (FieldRef, &String)| f.renamed(n.as_str()));
+        let lambda_parameters = std::iter::zip(lambda_params, &lambda.params)
+            .map(|(f, id)| f.renamed(crate::utils::normalize_ident(id.clone()).as_str()))
+            .collect::<Vec<_>>();
 
         let mut planner_context = planner_context
             .clone()
-            .with_lambda_parameters(lambda_parameters);
+            .with_lambda_parameters(lambda_parameters.clone());
 
         Ok(Lambda {
-            params,
+            params: LambdaParams::Bound(lambda_parameters),
             body: Box::new(self.sql_expr_to_logical_expr(
                 *lambda.body,
                 schema,

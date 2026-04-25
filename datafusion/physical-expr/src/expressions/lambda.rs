@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::physical_expr::PhysicalExpr;
 use arrow::{
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, FieldRef, Schema},
     record_batch::RecordBatch,
 };
 use datafusion_common::plan_err;
@@ -32,7 +32,7 @@ use datafusion_expr::ColumnarValue;
 /// Represents a lambda with the given parameters names and body
 #[derive(Debug, Eq, Clone)]
 pub struct LambdaExpr {
-    params: Vec<String>,
+    params: Vec<FieldRef>,
     body: Arc<dyn PhysicalExpr>,
 }
 
@@ -52,21 +52,33 @@ impl Hash for LambdaExpr {
 
 impl LambdaExpr {
     /// Create a new lambda expression with the given parameters and body
-    pub fn try_new(params: Vec<String>, body: Arc<dyn PhysicalExpr>) -> Result<Self> {
+    pub fn try_new(params: Vec<FieldRef>, body: Arc<dyn PhysicalExpr>) -> Result<Self> {
         if all_unique(&params) {
             Ok(Self::new(params, body))
         } else {
-            plan_err!("lambda params must be unique, got ({})", params.join(", "))
+            plan_err!(
+                "lambda params must be unique, got ({})",
+                params
+                    .iter()
+                    .map(|f| f.name().as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
     }
 
-    fn new(params: Vec<String>, body: Arc<dyn PhysicalExpr>) -> Self {
+    fn new(params: Vec<FieldRef>, body: Arc<dyn PhysicalExpr>) -> Self {
         Self { params, body }
     }
 
-    /// Get the lambda's params names
-    pub fn params(&self) -> &[String] {
+    /// Get the lambda's params
+    pub fn params(&self) -> &[FieldRef] {
         &self.params
+    }
+
+    /// Get the lambda's params
+    pub fn param_names(&self) -> impl Iterator<Item = &str> {
+        self.params.iter().map(|f| f.name().as_str())
     }
 
     /// Get the lambda's body
@@ -77,7 +89,12 @@ impl LambdaExpr {
 
 impl std::fmt::Display for LambdaExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "({}) -> {}", self.params.join(", "), self.body)
+        write!(
+            f,
+            "({}) -> {}",
+            self.param_names().collect::<Vec<_>>().join(", "),
+            self.body
+        )
     }
 }
 
@@ -113,29 +130,35 @@ impl PhysicalExpr for LambdaExpr {
     }
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}) -> {}", self.params.join(", "), self.body)
+        write!(
+            f,
+            "({}) -> {}",
+            self.param_names().collect::<Vec<_>>().join(", "),
+            self.body
+        )
     }
 }
 
 /// Create a lambda expression
 pub fn lambda(
-    params: impl IntoIterator<Item = impl Into<String>>,
+    params: impl IntoIterator<Item = FieldRef>,
     body: Arc<dyn PhysicalExpr>,
 ) -> Result<Arc<dyn PhysicalExpr>> {
     Ok(Arc::new(LambdaExpr::try_new(
-        params.into_iter().map(Into::into).collect(),
+        params.into_iter().collect(),
         body,
     )?))
 }
 
-fn all_unique(params: &[String]) -> bool {
+// Checks wheter params names are all unique
+fn all_unique(params: &[FieldRef]) -> bool {
     match params.len() {
         0 | 1 => true,
-        2 => params[0] != params[1],
+        2 => params[0].name() != params[1].name(),
         _ => {
             let mut set = HashSet::with_capacity(params.len());
 
-            params.iter().all(|p| set.insert(p.as_str()))
+            params.iter().all(|p| set.insert(p.name()))
         }
     }
 }
@@ -143,18 +166,25 @@ fn all_unique(params: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::expressions::{NoOp, lambda::lambda};
-    use arrow::{array::RecordBatch, datatypes::Schema};
+    use arrow::{
+        array::RecordBatch,
+        datatypes::{DataType, Field, FieldRef, Schema},
+    };
     use std::sync::Arc;
+
+    fn field_a() -> FieldRef {
+        Arc::new(Field::new("a", DataType::Null, true))
+    }
 
     #[test]
     fn test_lambda_evaluate() {
-        let lambda = lambda(["a"], Arc::new(NoOp::new())).unwrap();
+        let lambda = lambda([field_a()], Arc::new(NoOp::new())).unwrap();
         let batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
         assert!(lambda.evaluate(&batch).is_err());
     }
 
     #[test]
     fn test_lambda_duplicate_name() {
-        assert!(lambda(["a", "a"], Arc::new(NoOp::new())).is_err());
+        assert!(lambda([field_a(), field_a()], Arc::new(NoOp::new())).is_err());
     }
 }

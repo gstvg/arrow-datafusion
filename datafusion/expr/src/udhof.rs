@@ -328,12 +328,6 @@ pub trait HigherOrderUDF: Debug + DynEq + DynHash + Send + Sync + Any {
     /// lambdas are supported and some are optional, all should be returned,
     /// regardless of whether they are used on a particular invocation
     ///
-    /// Tip: If you have a [`HigherOrderFunction`] invocation, you can call the helper
-    /// [`HigherOrderFunction::lambda_parameters`] instead of this method directly
-    ///
-    /// [`HigherOrderFunction`]: crate::expr::HigherOrderFunction
-    /// [`HigherOrderFunction::lambda_parameters`]: crate::expr::HigherOrderFunction::lambda_parameters
-    ///
     /// Example for array_transform:
     ///
     /// `array_transform([2.0, 8.0], v -> v > 4.0)`
