@@ -1566,6 +1566,20 @@ impl SessionContext {
         state.register_udf(Arc::new(f)).ok();
     }
 
+    /// Registers a higher-order function within this context.
+    ///
+    /// Note in SQL queries, function names are looked up using
+    /// lowercase unless the query uses quotes. For example,
+    ///
+    /// - `SELECT MY_HIGHER_ORDER_FUNC(x)...` will look for a function named `"my_higher_order_func"`
+    /// - `SELECT "my_HIGHER_ORDER_FUNC"(x)` will look for a function named `"my_HIGHER_ORDER_FUNC"`
+    ///
+    /// Any functions registered with the function name or its aliases will be overwritten with this new function
+    pub fn register_higher_order_function(&self, f: Arc<dyn HigherOrderUDF>) {
+        let mut state = self.state.write();
+        state.register_higher_order_function(f).ok();
+    }
+
     /// Registers an aggregate UDF within this context.
     ///
     /// Note in SQL queries, aggregate names are looked up using
