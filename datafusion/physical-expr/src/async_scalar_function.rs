@@ -114,96 +114,113 @@ impl AsyncFuncExpr {
         batch: &RecordBatch,
         config_options: Arc<ConfigOptions>,
     ) -> Result<ColumnarValue> {
-        let Some(scalar_function_expr) = self.func.downcast_ref::<ScalarFunctionExpr>()
-        else {
-            return internal_err!(
-                "unexpected function type, expected ScalarFunctionExpr, got: {:?}",
-                self.func
-            );
-        };
+        invoke_with_args(
+            self.func.as_ref(),
+            Arc::clone(&self.return_field),
+            batch,
+            config_options,
+        )
+        .await
+    }
+}
 
-        let Some(async_udf) = scalar_function_expr
-            .fun()
-            .inner()
-            .downcast_ref::<AsyncScalarUDF>()
-        else {
-            return not_impl_err!(
-                "Don't know how to evaluate async function: {:?}",
-                scalar_function_expr
-            );
-        };
+/// This (async) function is called for each record batch to evaluate the LLM expressions
+///
+/// The output is the output of evaluating the async expression and the input record batch
+pub async fn invoke_with_args(
+    func: &dyn PhysicalExpr,
+    return_field: FieldRef,
+    batch: &RecordBatch,
+    config_options: Arc<ConfigOptions>,
+) -> Result<ColumnarValue> {
+    let Some(scalar_function_expr) = func.downcast_ref::<ScalarFunctionExpr>() else {
+        return internal_err!(
+            "unexpected function type, expected ScalarFunctionExpr, got: {:?}",
+            func
+        );
+    };
 
-        let arg_fields = scalar_function_expr
-            .args()
-            .iter()
-            .map(|e| e.return_field(batch.schema_ref()))
-            .collect::<Result<Vec<_>>>()?;
+    let Some(async_udf) = scalar_function_expr
+        .fun()
+        .inner()
+        .downcast_ref::<AsyncScalarUDF>()
+    else {
+        return not_impl_err!(
+            "Don't know how to evaluate async function: {:?}",
+            scalar_function_expr
+        );
+    };
 
-        let mut result_batches = vec![];
-        if let Some(ideal_batch_size) = self.ideal_batch_size()? {
-            let mut remainder = batch.clone();
-            while remainder.num_rows() > 0 {
-                let size = if ideal_batch_size > remainder.num_rows() {
-                    remainder.num_rows()
-                } else {
-                    ideal_batch_size
-                };
+    let arg_fields = scalar_function_expr
+        .args()
+        .iter()
+        .map(|e| e.return_field(batch.schema_ref()))
+        .collect::<Result<Vec<_>>>()?;
 
-                let current_batch = remainder.slice(0, size); // get next 10 rows
-                remainder = remainder.slice(size, remainder.num_rows() - size);
-                let args = scalar_function_expr
-                    .args()
-                    .iter()
-                    .map(|e| e.evaluate(&current_batch))
-                    .collect::<Result<Vec<_>>>()?;
-                result_batches.push(
-                    async_udf
-                        .invoke_async_with_args(ScalarFunctionArgs {
-                            args,
-                            arg_fields: arg_fields.clone(),
-                            number_rows: current_batch.num_rows(),
-                            return_field: Arc::clone(&self.return_field),
-                            config_options: Arc::clone(&config_options),
-                        })
-                        .await?,
-                );
-            }
-        } else {
+    let mut result_batches = vec![];
+    if let Some(ideal_batch_size) = async_udf.ideal_batch_size() {
+        let mut remainder = batch.clone();
+        while remainder.num_rows() > 0 {
+            let size = if ideal_batch_size > remainder.num_rows() {
+                remainder.num_rows()
+            } else {
+                ideal_batch_size
+            };
+
+            let current_batch = remainder.slice(0, size); // get next 10 rows
+            remainder = remainder.slice(size, remainder.num_rows() - size);
             let args = scalar_function_expr
                 .args()
                 .iter()
-                .map(|e| e.evaluate(batch))
+                .map(|e| e.evaluate(&current_batch))
                 .collect::<Result<Vec<_>>>()?;
-
             result_batches.push(
                 async_udf
                     .invoke_async_with_args(ScalarFunctionArgs {
-                        args: args.to_vec(),
-                        arg_fields,
-                        number_rows: batch.num_rows(),
-                        return_field: Arc::clone(&self.return_field),
+                        args,
+                        arg_fields: arg_fields.clone(),
+                        number_rows: current_batch.num_rows(),
+                        return_field: Arc::clone(&return_field),
                         config_options: Arc::clone(&config_options),
                     })
                     .await?,
             );
         }
-
-        let datas = result_batches
-            .into_iter()
-            .map(|cv| match cv {
-                ColumnarValue::Array(arr) => Ok(arr),
-                ColumnarValue::Scalar(scalar) => Ok(scalar.to_array_of_size(1)?),
-            })
+    } else {
+        let args = scalar_function_expr
+            .args()
+            .iter()
+            .map(|e| e.evaluate(batch))
             .collect::<Result<Vec<_>>>()?;
 
-        // Get references to the arrays as dyn Array to call concat
-        let dyn_arrays = datas
-            .iter()
-            .map(|arr| arr as &dyn arrow::array::Array)
-            .collect::<Vec<_>>();
-        let result_array = concat(&dyn_arrays)?;
-        Ok(ColumnarValue::Array(result_array))
+        result_batches.push(
+            async_udf
+                .invoke_async_with_args(ScalarFunctionArgs {
+                    args: args.to_vec(),
+                    arg_fields,
+                    number_rows: batch.num_rows(),
+                    return_field,
+                    config_options: Arc::clone(&config_options),
+                })
+                .await?,
+        );
     }
+
+    let datas = result_batches
+        .into_iter()
+        .map(|cv| match cv {
+            ColumnarValue::Array(arr) => Ok(arr),
+            ColumnarValue::Scalar(scalar) => Ok(scalar.to_array_of_size(1)?),
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Get references to the arrays as dyn Array to call concat
+    let dyn_arrays = datas
+        .iter()
+        .map(|arr| arr as &dyn arrow::array::Array)
+        .collect::<Vec<_>>();
+    let result_array = concat(&dyn_arrays)?;
+    Ok(ColumnarValue::Array(result_array))
 }
 
 impl PhysicalExpr for AsyncFuncExpr {

@@ -34,12 +34,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::PhysicalExpr;
+use crate::async_scalar_function::invoke_with_args;
 use crate::expressions::Literal;
 
 use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, FieldRef, Schema};
 use datafusion_common::config::{ConfigEntry, ConfigOptions};
-use datafusion_common::{Result, ScalarValue, internal_err};
+use datafusion_common::{Result, ScalarValue, exec_datafusion_err, internal_err};
 use datafusion_expr::interval_arithmetic::Interval;
 use datafusion_expr::sort_properties::ExprProperties;
 use datafusion_expr::type_coercion::functions::fields_with_udf;
@@ -47,6 +48,8 @@ use datafusion_expr::{
     ColumnarValue, ExpressionPlacement, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF,
     ScalarUDFImpl, Volatility, expr_vec_fmt,
 };
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 
 /// Physical expression of a scalar function
 pub struct ScalarFunctionExpr {
@@ -234,6 +237,24 @@ impl PhysicalExpr for ScalarFunctionExpr {
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
+        if self.fun.as_async().is_some() {
+            return block_in_place(move || {
+                Handle::try_current()
+                    .map_err(|err| {
+                        exec_datafusion_err!(
+                            "{} can't get handle of current tokio runtime: {err}",
+                            self.name()
+                        )
+                    })?
+                    .block_on(invoke_with_args(
+                        self,
+                        Arc::clone(&self.return_field),
+                        batch,
+                        Arc::clone(&self.config_options),
+                    ))
+            });
+        }
+
         let args = self
             .args
             .iter()

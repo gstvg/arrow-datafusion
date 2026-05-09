@@ -56,7 +56,7 @@ itertools = { workspace = true, features = ["use_std"] }
 parking_lot = { workspace = true }
 petgraph = "0.8.3"
 recursive = { workspace = true, optional = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 half = { workspace = true }
 
 [dev-dependencies]

@@ -31,7 +31,7 @@ use datafusion_execution::{RecordBatchStream, SendableRecordBatchStream, TaskCon
 use datafusion_physical_expr::ScalarFunctionExpr;
 use datafusion_physical_expr::async_scalar_function::AsyncFuncExpr;
 use datafusion_physical_expr::equivalence::ProjectionMapping;
-use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::expressions::{Column, LambdaVariable};
 use datafusion_physical_expr_common::metrics::{BaselineMetrics, RecordOutput};
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use futures::Stream;
@@ -340,6 +340,9 @@ impl AsyncMapper {
         physical_expr.apply(|expr| {
             if let Some(scalar_func_expr) = expr.downcast_ref::<ScalarFunctionExpr>()
                 && scalar_func_expr.fun().as_async().is_some()
+                && !expr.exists(|child| {
+                    Ok(child.downcast_ref::<LambdaVariable>().is_some())
+                })?
             {
                 let next_name = self.next_column_name();
                 self.async_exprs.push(Arc::new(AsyncFuncExpr::try_new(
