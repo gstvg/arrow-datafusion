@@ -22,6 +22,7 @@ SQL Reference
    :maxdepth: 2
 
    data_types
+   struct_coercion
    select
    subqueries
    ddl
@@ -32,5 +33,6 @@ SQL Reference
    aggregate_functions
    window_functions
    scalar_functions
-   sql_status
-   write_options
+   special_functions
+   format_options
+   prepared_statements
