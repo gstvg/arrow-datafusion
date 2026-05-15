@@ -1,8 +1,5 @@
 {
-    "build": {
-        "dockerfile": "./Dockerfile",
-        "context": "."
-    },
+    "image": "mcr.microsoft.com/devcontainers/rust:latest",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -11,6 +8,6 @@
         }
     },
     "features": {
-        "ghcr.io/devcontainers/features/rust:1": "latest"
+        "ghcr.io/devcontainers-extra/features/protoc:1": {}
     }
 }
