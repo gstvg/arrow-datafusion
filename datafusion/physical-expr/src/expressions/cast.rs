@@ -21,15 +21,20 @@ use std::sync::Arc;
 
 use crate::physical_expr::PhysicalExpr;
 
+use arrow::array::{Array, AsArray, RunArray};
 use arrow::compute::{CastOptions, can_cast_types};
-use arrow::datatypes::{DataType, DataType::*, FieldRef, Schema};
+use arrow::datatypes::{
+    DataType::{self, *},
+    FieldRef, Int32Type, Schema,
+};
+use arrow::datatypes::{Int16Type, Int64Type, RunEndIndexType};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::datatype::DataTypeExt;
 use datafusion_common::format::DEFAULT_FORMAT_OPTIONS;
 use datafusion_common::nested_struct::{
     requires_nested_struct_cast, validate_data_type_compatibility,
 };
-use datafusion_common::{Result, not_impl_err};
+use datafusion_common::{Result, ScalarValue, not_impl_err};
 use datafusion_expr_common::columnar_value::ColumnarValue;
 use datafusion_expr_common::interval_arithmetic::Interval;
 use datafusion_expr_common::sort_properties::ExprProperties;
@@ -245,6 +250,23 @@ impl PhysicalExpr for CastExpr {
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         let value = self.expr.evaluate(batch)?;
+
+        if let ColumnarValue::Array(array) = &value
+            && let RunEndEncoded(run, inner) = array.data_type()
+            && inner.data_type() == self.cast_type()
+        {
+            let scalar = match run.data_type() {
+                Int16 => get_scalar(array.as_run::<Int16Type>()),
+                Int32 => get_scalar(array.as_run::<Int32Type>()),
+                Int64 => get_scalar(array.as_run::<Int64Type>()),
+                _ => unreachable!(),
+            };
+
+            if let Ok(scalar) = scalar {
+                return Ok(ColumnarValue::Scalar(scalar));
+            }
+        }
+
         value.cast_to(self.cast_type(), Some(&self.cast_options))
     }
 
@@ -298,6 +320,20 @@ impl PhysicalExpr for CastExpr {
 
         write!(f, ")")
     }
+}
+
+fn get_scalar<R: RunEndIndexType>(run_end_array: &RunArray<R>) -> Result<ScalarValue> {
+    let start_physical_index = run_end_array.get_start_physical_index();
+
+    if start_physical_index == run_end_array.get_end_physical_index() {
+        if let Ok(scalar) =
+            ScalarValue::try_from_array(run_end_array.values(), start_physical_index)
+        {
+            return Ok(scalar);
+        }
+    }
+
+    todo!()
 }
 
 /// Return a PhysicalExpression representing `expr` casted to
